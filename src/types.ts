@@ -1,4 +1,4 @@
-export type Tool = "pen" | "eraser";
+export type Tool = "pen" | "highlighter" | "eraser";
 
 export interface Point {
   // Normalized [0..1] relative to the displayed page rect.

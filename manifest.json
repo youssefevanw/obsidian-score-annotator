@@ -1,9 +1,0 @@
-{
-  "id": "score-annotator",
-  "name": "ScoreAnnotator",
-  "version": "0.1.0",
-  "minAppVersion": "1.4.0",
-  "description": "Freehand annotation directly on PDF files, saved permanently into the PDF.",
-  "author": "ScoreAnnotator",
-  "isDesktopOnly": false
-}
