@@ -74,6 +74,7 @@ export class OverlayController {
   // True once the PDF on disk holds any of our InkAnnotations. Lets erase-all
   // round-trip: saving with no in-memory strokes still strips the baked set.
   private hasBakedStrokes = false;
+  private penStrokeActive = false;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private scrollHandler: (() => void) | null = null;
   private autosaveTimer: number | null = null;
@@ -598,7 +599,10 @@ export class OverlayController {
   }
 
   private onPointerDown(e: PointerEvent, b: PageBinding) {
-    if (!this.active) return;
+    // Palm rejection: a resting hand touch must not start a stroke while pen is drawing.
+    if (e.pointerType === "touch" && this.penStrokeActive) return;
+    // Pen draws unconditionally; mouse/touch require annotation mode.
+    if (!this.active && e.pointerType !== "pen") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (b.canvas.width === 0 || b.canvas.height === 0) this.resizeCanvas(b);
     b.canvas.setPointerCapture(e.pointerId);
@@ -614,9 +618,6 @@ export class OverlayController {
       };
     } else {
       const useHighlighter = this.tool === "highlighter";
-      // Strokes persist as tool: "pen" regardless of which writing tool was
-      // used — pdf-writer only bakes "pen" strokes, and visually pen vs
-      // highlighter is fully captured by width/opacity.
       b.currentStroke = {
         tool: "pen",
         color: this.colors[this.activeColorIndex] ?? "#000000",
@@ -624,6 +625,7 @@ export class OverlayController {
         opacity: useHighlighter ? this.highlighterOpacity : this.penOpacity,
         points: [p],
       };
+      if (e.pointerType === "pen") this.penStrokeActive = true;
     }
     this.redraw(b);
     e.preventDefault();
@@ -631,6 +633,11 @@ export class OverlayController {
 
   private onPointerMove(e: PointerEvent, b: PageBinding) {
     if (!b.currentStroke) return;
+    // Palm rejection during pen stroke.
+    if (e.pointerType === "touch" && this.penStrokeActive) {
+      e.preventDefault();
+      return;
+    }
     const p = this.pointFromEvent(e, b);
     if (b.currentStroke.tool === "eraser") {
       this.eraseAt(p, b);
@@ -649,6 +656,7 @@ export class OverlayController {
       strokes.push(b.currentStroke);
       this.allStrokes.set(b.pageIndex, strokes);
     }
+    if (e.pointerType === "pen") this.penStrokeActive = false;
     b.currentStroke = null;
     if (b.canvas.hasPointerCapture(e.pointerId)) {
       b.canvas.releasePointerCapture(e.pointerId);
