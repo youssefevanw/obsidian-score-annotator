@@ -1,0 +1,202 @@
+/* ================================================================
+   ScoreAnnotator plugin styles
+   ================================================================ */
+
+/* ------------------------------------------------------------------
+   Canvas overlay on each PDF page
+   ------------------------------------------------------------------ */
+
+.score-annotator-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  /* C1: always receives pointer events; handlers decide per-type */
+  pointer-events: auto;
+  /* Allow touch scroll when not actively drawing */
+  touch-action: pan-x pan-y;
+  z-index: 10;
+  cursor: default;
+}
+
+.score-annotator-overlay.score-annotator-active {
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* ------------------------------------------------------------------
+   Floating toolbar
+   ------------------------------------------------------------------ */
+
+.score-annotator-toolbar {
+  position: fixed;
+  top: 96px;   /* offset below PDF++ toolbar */
+  right: 8px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 4px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  user-select: none;
+  min-width: 36px;
+}
+
+/* ------------------------------------------------------------------
+   Toolbar buttons
+   ------------------------------------------------------------------ */
+
+.score-annotator-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.score-annotator-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.score-annotator-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* Thin separator line between toolbar sections */
+.score-annotator-divider {
+  width: 20px;
+  height: 1px;
+  background: var(--background-modifier-border);
+  margin: 2px 0;
+  flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------
+   Color swatches
+   ------------------------------------------------------------------ */
+
+.score-annotator-swatches {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+}
+
+.score-annotator-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.12s;
+  flex-shrink: 0;
+}
+
+.score-annotator-swatch.is-active {
+  border-color: var(--interactive-accent);
+}
+
+.score-annotator-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+  border-radius: 50%;
+}
+.score-annotator-swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+.score-annotator-swatch::-moz-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+/* ------------------------------------------------------------------
+   Width dots  (C3)
+   ------------------------------------------------------------------ */
+
+.score-annotator-width-dots {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+/* Each dot is a button; the visible circle is its child */
+.score-annotator-width-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  box-sizing: border-box;
+  transition: background 0.1s, box-shadow 0.1s;
+  flex-shrink: 0;
+}
+
+.score-annotator-width-dot:hover {
+  background: var(--background-modifier-hover);
+}
+
+.score-annotator-width-dot.is-active {
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+/* Filled circle at the actual stroke diameter */
+.score-annotator-width-dot-inner {
+  border-radius: 50%;
+  background: var(--text-normal);
+  flex-shrink: 0;
+  /* size set via inline style */
+}
+
+/* ------------------------------------------------------------------
+   Opacity chips  (C3 — highlighter only)
+   ------------------------------------------------------------------ */
+
+.score-annotator-opacity-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+}
+
+.score-annotator-opacity-chip {
+  width: 22px;
+  height: 14px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  box-sizing: border-box;
+  transition: box-shadow 0.1s;
+  flex-shrink: 0;
+  /* background color set in JS: rgba(r, g, b, alpha) */
+}
+
+.score-annotator-opacity-chip.is-active {
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}

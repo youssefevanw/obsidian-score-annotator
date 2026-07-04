@@ -66,7 +66,7 @@ export default class ScoreAnnotatorPlugin extends Plugin {
   }
 
   private getActiveController(): OverlayController | undefined {
-    const leaf = this.app.workspace.activeLeaf;
+    const leaf = this.app.workspace.getMostRecentLeaf();
     if (!leaf) return undefined;
     return this.controllers.get(leaf);
   }

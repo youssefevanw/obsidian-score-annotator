@@ -1,6 +1,6 @@
 {
   "name": "score-annotator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Obsidian plugin for permanent freehand PDF annotation.",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
   },
   "keywords": [],
-  "author": "",
+  "author": "Sr. Peter Joseph",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",

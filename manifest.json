@@ -1,0 +1,10 @@
+{
+  "id": "score-annotator",
+  "name": "ScoreAnnotator",
+  "version": "0.2.0",
+  "minAppVersion": "1.4.0",
+  "description": "Freehand PDF annotation with permanent InkAnnotations — pen, highlighter, eraser, undo, pressure-sensitive strokes.",
+  "author": "Sr. Peter Joseph",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
