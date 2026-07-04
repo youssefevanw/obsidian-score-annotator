@@ -15,8 +15,6 @@ export interface ToolbarOpts {
 
   getPenWidth: () => number;
   setPenWidth: (w: number) => void;
-  getPenOpacity: () => number;
-  setPenOpacity: (o: number) => void;
   getHighlighterWidth: () => number;
   setHighlighterWidth: (w: number) => void;
   getHighlighterOpacity: () => number;
@@ -25,6 +23,13 @@ export interface ToolbarOpts {
   onSave: () => void;
   onAddPage?: () => void;
 }
+
+// Width presets per tool (in PDF points / CSS px).
+const PEN_WIDTHS = [0.5, 1, 2, 3.5, 6] as const;
+const HIGHLIGHTER_WIDTHS = [6, 12, 20] as const;
+
+// Opacity presets for the highlighter (pen is always 1.0).
+const HIGHLIGHTER_OPACITIES = [0.25, 0.5, 0.75] as const;
 
 const SWATCH_COUNT = 5;
 
@@ -35,8 +40,10 @@ export class Toolbar {
   private highlighterBtn!: HTMLButtonElement;
   private eraserBtn!: HTMLButtonElement;
   private swatches: HTMLInputElement[] = [];
-  private widthInput!: HTMLInputElement;
-  private opacityInput!: HTMLInputElement;
+  private widthDotsEl!: HTMLDivElement;
+  private widthDots: HTMLButtonElement[] = [];
+  private opacityChipsEl!: HTMLDivElement;
+  private opacityChips: HTMLButtonElement[] = [];
 
   constructor(private host: HTMLElement, private opts: ToolbarOpts) {
     this.root = document.createElement("div");
@@ -68,17 +75,74 @@ export class Toolbar {
       sw.classList.toggle("is-active", i === activeIdx);
     }
 
-    const writing = writingTool(tool);
-    this.widthInput.value = String(
-      writing === "highlighter"
+    this.refreshWidthDots(tool);
+    this.refreshOpacityChips(tool);
+  }
+
+  private refreshWidthDots(tool: Tool) {
+    const presets = tool === "highlighter" ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS;
+    const current =
+      tool === "highlighter"
         ? this.opts.getHighlighterWidth()
-        : this.opts.getPenWidth(),
-    );
-    this.opacityInput.value = String(
-      writing === "highlighter"
-        ? this.opts.getHighlighterOpacity()
-        : this.opts.getPenOpacity(),
-    );
+        : this.opts.getPenWidth();
+
+    // Rebuild the dot row only when the preset set has changed length
+    // (pen↔highlighter switch). Using data attribute to track.
+    const currentLen = this.widthDotsEl.dataset.len ?? "";
+    if (currentLen !== String(presets.length)) {
+      this.widthDotsEl.innerHTML = "";
+      this.widthDots = [];
+      for (const w of presets) {
+        const btn = document.createElement("button");
+        btn.className = "score-annotator-width-dot";
+        btn.title = `${w} pt`;
+        btn.dataset.width = String(w);
+
+        const inner = document.createElement("span");
+        inner.className = "score-annotator-width-dot-inner";
+        // Visible diameter: actual stroke width, minimum 2px so hairline shows.
+        const sizePx = Math.max(2, w);
+        inner.style.width = `${sizePx}px`;
+        inner.style.height = `${sizePx}px`;
+        btn.appendChild(inner);
+
+        btn.addEventListener("click", () => {
+          if (this.opts.getTool() === "highlighter") {
+            this.opts.setHighlighterWidth(w);
+          } else {
+            this.opts.setPenWidth(w);
+          }
+          this.refresh();
+        });
+        this.widthDots.push(btn);
+        this.widthDotsEl.appendChild(btn);
+      }
+      this.widthDotsEl.dataset.len = String(presets.length);
+    }
+
+    // Mark the active dot (nearest preset to current value).
+    let bestIdx = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < presets.length; i++) {
+      const diff = Math.abs(presets[i] - current);
+      if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+    }
+    this.widthDots.forEach((d, i) => d.classList.toggle("is-active", i === bestIdx));
+  }
+
+  private refreshOpacityChips(tool: Tool) {
+    const show = tool === "highlighter";
+    this.opacityChipsEl.style.display = show ? "" : "none";
+    if (!show) return;
+
+    const current = this.opts.getHighlighterOpacity();
+    const activeColor = this.opts.getColors()[this.opts.getActiveColorIndex()] ?? "#000000";
+
+    this.opacityChips.forEach((chip, i) => {
+      const alpha = HIGHLIGHTER_OPACITIES[i];
+      chip.style.background = hexToRgba(activeColor, alpha);
+      chip.classList.toggle("is-active", Math.abs(current - alpha) < 0.01);
+    });
   }
 
   private build() {
@@ -100,6 +164,7 @@ export class Toolbar {
       this.refresh();
     });
 
+    // Color swatches
     const swatchRow = document.createElement("div");
     swatchRow.className = "score-annotator-swatches";
     const initialColors = this.opts.getColors();
@@ -109,73 +174,52 @@ export class Toolbar {
       sw.className = "score-annotator-swatch";
       sw.value = initialColors[i] ?? "#000000";
       sw.title = `Color ${i + 1}`;
-      // Native color inputs open the picker on click. Make that same click
-      // also activate the swatch, so the visible "selected" state always
-      // matches the color about to be used.
       sw.addEventListener("click", () => {
         this.opts.setActiveColorIndex(i);
         this.refresh();
       });
       sw.addEventListener("input", () => {
         this.opts.setColor(i, sw.value);
+        this.refresh(); // opacity chips may need new color
       });
       this.swatches.push(sw);
       swatchRow.appendChild(sw);
     }
 
-    this.widthInput = document.createElement("input");
-    this.widthInput.type = "range";
-    this.widthInput.min = "1";
-    this.widthInput.max = "12";
-    this.widthInput.step = "1";
-    this.widthInput.title = "Stroke width";
-    this.widthInput.className = "score-annotator-width-input";
-    this.widthInput.setAttribute("orient", "vertical");
-    this.widthInput.addEventListener("input", () => {
-      const v = Number(this.widthInput.value);
-      if (writingTool(this.opts.getTool()) === "highlighter") {
-        this.opts.setHighlighterWidth(v);
-      } else {
-        this.opts.setPenWidth(v);
-      }
-    });
-    const widthLabel = document.createElement("label");
-    widthLabel.className = "score-annotator-width";
-    widthLabel.title = "Stroke width";
-    widthLabel.appendChild(this.widthInput);
+    // Width dots container (populated in refreshWidthDots)
+    this.widthDotsEl = document.createElement("div");
+    this.widthDotsEl.className = "score-annotator-width-dots";
 
-    this.opacityInput = document.createElement("input");
-    this.opacityInput.type = "range";
-    this.opacityInput.min = "0.1";
-    this.opacityInput.max = "1";
-    this.opacityInput.step = "0.05";
-    this.opacityInput.title = "Opacity";
-    this.opacityInput.className = "score-annotator-opacity-input";
-    this.opacityInput.setAttribute("orient", "vertical");
-    this.opacityInput.addEventListener("input", () => {
-      const v = Number(this.opacityInput.value);
-      if (writingTool(this.opts.getTool()) === "highlighter") {
-        this.opts.setHighlighterOpacity(v);
-      } else {
-        this.opts.setPenOpacity(v);
-      }
-    });
-    const opacityLabel = document.createElement("label");
-    opacityLabel.className = "score-annotator-opacity";
-    opacityLabel.title = "Opacity";
-    opacityLabel.appendChild(this.opacityInput);
+    // Opacity chips (highlighter-only, built once)
+    this.opacityChipsEl = document.createElement("div");
+    this.opacityChipsEl.className = "score-annotator-opacity-chips";
+    for (const alpha of HIGHLIGHTER_OPACITIES) {
+      const chip = document.createElement("button");
+      chip.className = "score-annotator-opacity-chip";
+      chip.title = `${Math.round(alpha * 100)}%`;
+      chip.addEventListener("click", () => {
+        this.opts.setHighlighterOpacity(alpha);
+        this.refresh();
+      });
+      this.opacityChips.push(chip);
+      this.opacityChipsEl.appendChild(chip);
+    }
 
     const children: HTMLElement[] = [
       this.toggleBtn,
+      mkDivider(),
       this.penBtn,
       this.highlighterBtn,
       this.eraserBtn,
+      mkDivider(),
       swatchRow,
-      widthLabel,
-      opacityLabel,
+      mkDivider(),
+      this.widthDotsEl,
+      this.opacityChipsEl,
     ];
 
     if (this.opts.onAddPage) {
+      children.push(mkDivider());
       const addBtn = this.mkBtn(
         "file-plus",
         "Append a new page using the same template",
@@ -185,6 +229,7 @@ export class Toolbar {
       children.push(addBtn);
     }
 
+    children.push(mkDivider());
     const saveBtn = this.mkBtn("save", "Save annotations into the PDF", () =>
       this.opts.onSave(),
     );
@@ -210,8 +255,18 @@ export class Toolbar {
   }
 }
 
-// Sliders only meaningfully control writing tools — when eraser is active
-// they still reflect & edit pen settings so the controls never feel inert.
-function writingTool(t: Tool): "pen" | "highlighter" {
-  return t === "highlighter" ? "highlighter" : "pen";
+function mkDivider(): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "score-annotator-divider";
+  return d;
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const m = /^#?([a-f0-9]{6})$/i.exec(hex.trim());
+  if (!m) return `rgba(0,0,0,${alpha})`;
+  const v = parseInt(m[1], 16);
+  const r = (v >> 16) & 0xff;
+  const g = (v >> 8) & 0xff;
+  const b = v & 0xff;
+  return `rgba(${r},${g},${b},${alpha})`;
 }

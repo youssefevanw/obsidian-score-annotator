@@ -107,8 +107,6 @@ export class OverlayController {
       },
       getPenWidth: () => this.penWidth,
       setPenWidth: (w) => (this.penWidth = w),
-      getPenOpacity: () => this.penOpacity,
-      setPenOpacity: (o) => (this.penOpacity = o),
       getHighlighterWidth: () => this.highlighterWidth,
       setHighlighterWidth: (w) => (this.highlighterWidth = w),
       getHighlighterOpacity: () => this.highlighterOpacity,
