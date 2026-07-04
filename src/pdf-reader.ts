@@ -5,6 +5,8 @@ import {
   PDFDocument,
   PDFName,
   PDFNumber,
+  PDFString,
+  PDFHexString,
 } from "pdf-lib";
 import { isOwnInkAnnotation } from "./pdf-writer";
 import { PageStrokes, Point, Stroke } from "./types";
@@ -44,6 +46,8 @@ export async function readStrokesFromPdf(
       const color = readColor(ctx, dict);
       const opacity = readNumber(ctx, dict, "CA", DEFAULT_OPACITY);
       const width = readBorderWidth(ctx, dict);
+      const kind = readKind(ctx, dict);
+      const pressures = readPressures(ctx, dict);
 
       for (let pi = 0; pi < inkList.size(); pi++) {
         const path = ctx.lookupMaybe(inkList.get(pi), PDFArray);
@@ -54,9 +58,12 @@ export async function readStrokesFromPdf(
           mediaWidth,
           mediaHeight,
           rotation,
+          pressures,
         );
         if (points.length < 2) continue;
-        strokes.push({ tool: "pen", color, width, opacity, points });
+        const stroke: Stroke = { tool: "pen", color, width, opacity, points };
+        if (kind) stroke.kind = kind;
+        strokes.push(stroke);
       }
     }
 
@@ -72,21 +79,25 @@ function pathToNormalizedPoints(
   mediaWidth: number,
   mediaHeight: number,
   rotation: number,
+  pressures: number[] | null,
 ): Point[] {
   const points: Point[] = [];
   for (let i = 0; i + 1 < path.size(); i += 2) {
     const xn = ctx.lookupMaybe(path.get(i), PDFNumber);
     const yn = ctx.lookupMaybe(path.get(i + 1), PDFNumber);
     if (!xn || !yn) continue;
-    points.push(
-      nativeToNormalized(
-        xn.value(),
-        yn.value(),
-        mediaWidth,
-        mediaHeight,
-        rotation,
-      ),
+    const pt = nativeToNormalized(
+      xn.value(),
+      yn.value(),
+      mediaWidth,
+      mediaHeight,
+      rotation,
     );
+    const pointIndex = points.length;
+    if (pressures && pointIndex < pressures.length) {
+      pt.p = pressures[pointIndex];
+    }
+    points.push(pt);
   }
   return points;
 }
@@ -154,6 +165,29 @@ function readBorderWidth(ctx: PDFContext, dict: PDFDict): number {
     if (w) return w.value();
   }
   return DEFAULT_WIDTH;
+}
+
+function readKind(
+  ctx: PDFContext,
+  dict: PDFDict,
+): "pen" | "highlighter" | undefined {
+  const raw = dict.get(PDFName.of("SAKind"));
+  const str = ctx.lookupMaybe(raw, PDFString) ?? ctx.lookupMaybe(raw, PDFHexString);
+  if (!str) return undefined;
+  const text = str.decodeText();
+  if (text === "pen" || text === "highlighter") return text;
+  return undefined;
+}
+
+function readPressures(ctx: PDFContext, dict: PDFDict): number[] | null {
+  const raw = ctx.lookupMaybe(dict.get(PDFName.of("SAPress")), PDFArray);
+  if (!raw) return null;
+  const pressures: number[] = [];
+  for (let i = 0; i < raw.size(); i++) {
+    const n = ctx.lookupMaybe(raw.get(i), PDFNumber);
+    pressures.push(n ? Math.max(0, Math.min(1, n.value())) : 0.5);
+  }
+  return pressures.length > 0 ? pressures : null;
 }
 
 function rgbToHex(r: number, g: number, b: number): string {

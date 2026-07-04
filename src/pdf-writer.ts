@@ -4,11 +4,13 @@ import {
   PDFDocument,
   PDFHexString,
   PDFName,
+  PDFNumber,
   PDFPage,
   PDFRef,
   PDFString,
 } from "pdf-lib";
 import { PageStrokes, Stroke } from "./types";
+import { strokeOutlineCoords } from "./ink";
 
 // Marker used to identify InkAnnotations created by this plugin so we can
 // strip + rewrite them idempotently on each save. /T also shows up as the
@@ -90,6 +92,12 @@ function addInkAnnotations(
     const native = stroke.points.map((p) =>
       normalizedToNative(p.x, p.y, width, height, rotation),
     );
+    // Attach pressure to native points for the appearance stream.
+    const nativeWithPressure = native.map((pt, i) => ({
+      x: pt.x,
+      y: pt.y,
+      p: stroke.points[i]?.p,
+    }));
 
     let minX = Infinity;
     let minY = Infinity;
@@ -111,14 +119,26 @@ function addInkAnnotations(
       maxY + pad,
     ];
 
-    const apRef = buildInkAppearance(
-      pdfDoc,
-      native,
-      rect,
-      color,
-      stroke.width,
-      stroke.opacity,
-    );
+    const strokeKind = stroke.kind ?? (stroke.opacity < 1 ? "highlighter" : "pen");
+    const hasPressure = stroke.points.some((p) => p.p !== undefined && p.p > 0);
+
+    const apRef = strokeKind === "pen"
+      ? buildFilledInkAppearance(
+          pdfDoc,
+          nativeWithPressure,
+          rect,
+          color,
+          stroke.width,
+          stroke.opacity,
+        )
+      : buildStrokedInkAppearance(
+          pdfDoc,
+          native,
+          rect,
+          color,
+          stroke.width,
+          stroke.opacity,
+        );
 
     const annotDict = pdfDoc.context.obj({
       Type: "Annot",
@@ -132,16 +152,51 @@ function addInkAnnotations(
       AP: { N: apRef },
       T: PDFString.of(ANNOT_TAG),
       [ANNOT_MARKER_KEY]: ANNOT_VERSION,
-    });
+      SAKind: PDFString.of(strokeKind),
+    }) as PDFDict;
+
+    if (hasPressure) {
+      const pressureArr = pdfDoc.context.obj(
+        stroke.points.map((p) => PDFNumber.of(p.p ?? 0.5)),
+      ) as PDFArray;
+      annotDict.set(PDFName.of("SAPress"), pressureArr);
+    }
+
     annots.push(pdfDoc.context.register(annotDict));
   }
 }
 
-// Acrobat does not synthesize a default appearance for third-party Ink
-// annotations — without an /AP /N Form XObject, the stroke renders blank.
-// Preview is similarly inconsistent. Bake the path into an appearance stream
-// in page user space so every viewer renders identically.
-function buildInkAppearance(
+// Appearance stream for pen strokes: filled perfect-freehand outline polygon.
+// Produces variable-width strokes that match the canvas rendering exactly.
+function buildFilledInkAppearance(
+  pdfDoc: PDFDocument,
+  points: { x: number; y: number; p?: number }[],
+  bbox: [number, number, number, number],
+  color: { r: number; g: number; b: number },
+  width: number,
+  opacity: number,
+): PDFRef {
+  const poly = strokeOutlineCoords(points, width);
+
+  const useExtState = opacity < 1;
+  const ops: string[] = ["q"];
+  if (useExtState) ops.push("/G0 gs");
+  ops.push(`${fmtNum(color.r)} ${fmtNum(color.g)} ${fmtNum(color.b)} rg`); // fill color
+  if (poly.length >= 3) {
+    ops.push(`${fmtNum(poly[0][0])} ${fmtNum(poly[0][1])} m`);
+    for (let i = 1; i < poly.length; i++) {
+      ops.push(`${fmtNum(poly[i][0])} ${fmtNum(poly[i][1])} l`);
+    }
+    ops.push("h"); // close
+    ops.push("f"); // fill
+  }
+  ops.push("Q");
+
+  return buildAppearanceStream(pdfDoc, ops, bbox, useExtState, opacity);
+}
+
+// Appearance stream for highlighter / legacy strokes: uniform stroked polyline.
+function buildStrokedInkAppearance(
   pdfDoc: PDFDocument,
   points: { x: number; y: number }[],
   bbox: [number, number, number, number],
@@ -152,7 +207,7 @@ function buildInkAppearance(
   const useExtState = opacity < 1;
   const ops: string[] = ["q"];
   if (useExtState) ops.push("/G0 gs");
-  ops.push(`${fmtNum(color.r)} ${fmtNum(color.g)} ${fmtNum(color.b)} RG`);
+  ops.push(`${fmtNum(color.r)} ${fmtNum(color.g)} ${fmtNum(color.b)} RG`); // stroke color
   ops.push(`${fmtNum(width)} w`);
   ops.push("1 J"); // round caps
   ops.push("1 j"); // round joins
@@ -163,8 +218,17 @@ function buildInkAppearance(
   ops.push("S");
   ops.push("Q");
 
-  const contentBytes = new TextEncoder().encode(ops.join("\n"));
+  return buildAppearanceStream(pdfDoc, ops, bbox, useExtState, opacity);
+}
 
+function buildAppearanceStream(
+  pdfDoc: PDFDocument,
+  ops: string[],
+  bbox: [number, number, number, number],
+  useExtState: boolean,
+  opacity: number,
+): PDFRef {
+  const contentBytes = new TextEncoder().encode(ops.join("\n"));
   const resources = useExtState
     ? {
         ProcSet: ["PDF"],

@@ -4,6 +4,8 @@ export interface Point {
   // Normalized [0..1] relative to the displayed page rect.
   x: number;
   y: number;
+  // Stylus pressure [0..1]. Absent on legacy strokes and mouse strokes.
+  p?: number;
 }
 
 export interface Stroke {
@@ -14,6 +16,8 @@ export interface Stroke {
   width: number;
   opacity: number;
   points: Point[];
+  // Explicit rendering kind. Absent on legacy strokes (infer from opacity).
+  kind?: "pen" | "highlighter";
 }
 
 export interface PageStrokes {

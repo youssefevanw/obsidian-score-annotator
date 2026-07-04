@@ -19,6 +19,7 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
-    "pdf-lib": "^1.17.1"
+    "pdf-lib": "^1.17.1",
+    "perfect-freehand": "^1.2.3"
   }
 }

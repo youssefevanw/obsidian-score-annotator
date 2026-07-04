@@ -11,6 +11,7 @@ import {
   parsePaperSubject,
 } from "./paper-generator";
 import { History } from "./history";
+import { paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
 
 const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#e63946",
@@ -639,12 +640,14 @@ export class OverlayController {
       };
     } else {
       const useHighlighter = this.tool === "highlighter";
+      const pressure = pointerPressure(e);
       b.currentStroke = {
         tool: "pen",
+        kind: useHighlighter ? "highlighter" : "pen",
         color: this.colors[this.activeColorIndex] ?? "#000000",
         width: useHighlighter ? this.highlighterWidth : this.penWidth,
         opacity: useHighlighter ? this.highlighterOpacity : this.penOpacity,
-        points: [p],
+        points: [{ x: p.x, y: p.y, p: pressure }],
       };
       if (e.pointerType === "pen") this.penStrokeActive = true;
     }
@@ -659,11 +662,18 @@ export class OverlayController {
       e.preventDefault();
       return;
     }
-    const p = this.pointFromEvent(e, b);
+    // Drain coalesced events for full tablet sample rate; fall back to [e].
+    const events: PointerEvent[] =
+      typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
+    if (events.length === 0) events.push(e);
+
     if (b.currentStroke.tool === "eraser") {
-      this.eraseAt(p, b);
+      for (const ev of events) this.eraseAt(this.pointFromEvent(ev, b), b);
     } else {
-      b.currentStroke.points.push(p);
+      for (const ev of events) {
+        const p = this.pointFromEvent(ev, b);
+        b.currentStroke.points.push({ x: p.x, y: p.y, p: pointerPressure(ev) });
+      }
     }
     this.redraw(b);
     e.preventDefault();
@@ -831,18 +841,18 @@ export class OverlayController {
     w: number,
     h: number,
   ) {
-    if (stroke.points.length === 0) return;
-    ctx.save();
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.lineWidth = stroke.width;
-    ctx.globalAlpha = stroke.opacity;
-    ctx.strokeStyle = stroke.color || "#000";
-    ctx.beginPath();
-    const [first, ...rest] = stroke.points;
-    ctx.moveTo(first.x * w, first.y * h);
-    for (const p of rest) ctx.lineTo(p.x * w, p.y * h);
-    ctx.stroke();
-    ctx.restore();
+    if (strokeKind(stroke) === "highlighter") {
+      paintHighlighterStroke(ctx, stroke, w, h);
+    } else {
+      paintPenStroke(ctx, stroke, w, h);
+    }
   }
+}
+
+// Returns a normalised pressure value for a pointer event.
+// Mouse/touch report 0 or a fixed value — treat as 0.5 so perfect-freehand
+// uses simulatePressure and produces uniform-width strokes for those inputs.
+function pointerPressure(e: PointerEvent): number {
+  if (e.pointerType === "mouse" || e.pointerType === "touch") return 0.5;
+  return Math.max(0, Math.min(1, e.pressure));
 }
