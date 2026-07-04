@@ -200,7 +200,7 @@ export class OverlayController {
     this.toolbar?.refresh();
   }
 
-  async save() {
+  async save(successNotice = "Annotations saved") {
     if (this.saving) return;
     const file = this.getFile();
     if (!file) {
@@ -241,7 +241,7 @@ export class OverlayController {
       for (const b of this.bindings.values()) this.redraw(b);
       await deleteSidecar(this.app, file);
       this.hasBakedStrokes = pages.length > 0;
-      new Notice("Annotations saved");
+      new Notice(successNotice);
     } catch (err) {
       console.error("ScoreAnnotator save failed:", err);
       new Notice("Save failed — see console");
@@ -554,6 +554,7 @@ export class OverlayController {
     for (const el of Array.from(candidates)) {
       if (el.style.display === "none") continue;
       el.style.display = "none";
+      console.count("SA:hideInkInPage:hidden");
     }
     this.logAnnotationLayerOnce(pageEl);
   }
@@ -711,7 +712,7 @@ export class OverlayController {
     }
     this.bakedRewriteTimer = window.setTimeout(() => {
       this.bakedRewriteTimer = null;
-      void this.save();
+      void this.save("PDF updated");
     }, 800);
   }
 
