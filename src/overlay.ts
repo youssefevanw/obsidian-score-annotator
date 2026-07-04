@@ -10,6 +10,7 @@ import {
   addTemplatePage,
   parsePaperSubject,
 } from "./paper-generator";
+import { History } from "./history";
 
 const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#e63946",
@@ -27,6 +28,8 @@ interface PageBinding {
   resizeObserver: ResizeObserver;
   inkObserver: MutationObserver;
   currentStroke: Stroke | null;
+  erasedInGesture: Stroke[];   // strokes removed during current erase gesture
+  anyBakedErased: boolean;     // whether any baked stroke was erased in this gesture
 }
 
 const AUTOSAVE_DEBOUNCE_MS = 500;
@@ -75,6 +78,7 @@ export class OverlayController {
   // round-trip: saving with no in-memory strokes still strips the baked set.
   private hasBakedStrokes = false;
   private penStrokeActive = false;
+  private history = new History();
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private scrollHandler: (() => void) | null = null;
   private autosaveTimer: number | null = null;
@@ -131,11 +135,25 @@ export class OverlayController {
     this.observer.observe(root, { childList: true, subtree: true });
 
     this.keydownHandler = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
-      if (!this.active && !this.hasUnsavedStrokes()) return;
-      e.preventDefault();
-      e.stopPropagation();
-      void this.save();
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      const key = e.key.toLowerCase();
+      if (key === "s") {
+        if (!this.active && !this.hasUnsavedStrokes()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void this.save();
+      } else if (key === "z" && !e.shiftKey) {
+        if (!this.history.canUndo()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.applyUndo();
+      } else if (key === "z" && e.shiftKey) {
+        if (!this.history.canRedo()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.applyRedo();
+      }
     };
     root.addEventListener("keydown", this.keydownHandler, true);
 
@@ -334,6 +352,7 @@ export class OverlayController {
     }
     this.allStrokes.clear();
     this.hasBakedStrokes = false;
+    this.history.clear();
     this.initialLoadStarted = true;
     void this.applyInitialState(file);
   }
@@ -499,6 +518,8 @@ export class OverlayController {
         this.hideInkInPage(pageEl);
       }),
       currentStroke: null,
+      erasedInGesture: [],
+      anyBakedErased: false,
     };
     binding.resizeObserver.observe(pageEl);
     binding.inkObserver.observe(pageEl, { childList: true, subtree: true });
@@ -608,6 +629,8 @@ export class OverlayController {
     b.canvas.setPointerCapture(e.pointerId);
     const p = this.pointFromEvent(e, b);
     if (this.tool === "eraser") {
+      b.erasedInGesture = [];
+      b.anyBakedErased = false;
       this.eraseAt(p, b);
       b.currentStroke = {
         tool: "eraser",
@@ -651,10 +674,22 @@ export class OverlayController {
   private onPointerUp(e: PointerEvent, b: PageBinding) {
     if (!b.currentStroke) return;
     const wasPen = b.currentStroke.tool === "pen";
+    const wasEraser = b.currentStroke.tool === "eraser";
     if (wasPen && b.currentStroke.points.length > 0) {
       const strokes = this.allStrokes.get(b.pageIndex) ?? [];
       strokes.push(b.currentStroke);
       this.allStrokes.set(b.pageIndex, strokes);
+      this.history.push({ type: "add", pageIndex: b.pageIndex, stroke: b.currentStroke });
+    } else if (wasEraser && b.erasedInGesture.length > 0) {
+      // One erase gesture → one history entry (undo restores all at once).
+      this.history.push({
+        type: "erase",
+        pageIndex: b.pageIndex,
+        strokes: b.erasedInGesture.slice(),
+        anyBaked: b.anyBakedErased,
+      });
+      b.erasedInGesture = [];
+      b.anyBakedErased = false;
     }
     if (e.pointerType === "pen") this.penStrokeActive = false;
     b.currentStroke = null;
@@ -695,23 +730,26 @@ export class OverlayController {
     const radiusCss = Math.max(8, this.penWidth * 2);
     const r2 = radiusCss * radiusCss;
     const strokes = this.allStrokes.get(b.pageIndex) ?? [];
-    let erasedBaked = false;
-    const filtered = strokes.filter((s) => {
+    const filtered: Stroke[] = [];
+    for (const s of strokes) {
+      let hit = false;
       for (const sp of s.points) {
         const dx = (sp.x - p.x) * w;
         const dy = (sp.y - p.y) * h;
-        if (dx * dx + dy * dy <= r2) {
-          if (this.bakedStrokes.has(s)) erasedBaked = true;
-          return false;
-        }
+        if (dx * dx + dy * dy <= r2) { hit = true; break; }
       }
-      return true;
-    });
+      if (hit) {
+        if (this.bakedStrokes.has(s)) b.anyBakedErased = true;
+        b.erasedInGesture.push(s);
+      } else {
+        filtered.push(s);
+      }
+    }
     this.allStrokes.set(b.pageIndex, filtered);
     // Baked strokes are painted by PDF.js from /AP /N; removing them from
     // our memory doesn't make them disappear visually. Trigger a debounced
     // re-save so the PDF gets rewritten without them and PDF.js reloads.
-    if (erasedBaked) this.scheduleBakedRewrite();
+    if (b.anyBakedErased) this.scheduleBakedRewrite();
   }
 
   private scheduleBakedRewrite() {
@@ -722,6 +760,58 @@ export class OverlayController {
       this.bakedRewriteTimer = null;
       void this.save("PDF updated");
     }, 800);
+  }
+
+  private applyUndo() {
+    const action = this.history.undo();
+    if (!action) return;
+    if (action.type === "add") {
+      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
+      const idx = strokes.lastIndexOf(action.stroke);
+      if (idx !== -1) strokes.splice(idx, 1);
+      this.allStrokes.set(action.pageIndex, strokes);
+      const b = this.bindingForPageIndex(action.pageIndex);
+      if (b) this.redraw(b);
+      this.scheduleAutosave();
+    } else {
+      // erase undo: re-insert the removed strokes
+      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
+      strokes.push(...action.strokes);
+      this.allStrokes.set(action.pageIndex, strokes);
+      const b = this.bindingForPageIndex(action.pageIndex);
+      if (b) this.redraw(b);
+      if (action.anyBaked) {
+        // Re-save so the PDF regains the strokes.
+        this.scheduleBakedRewrite();
+      } else {
+        this.scheduleAutosave();
+      }
+    }
+  }
+
+  private applyRedo() {
+    const action = this.history.redo();
+    if (!action) return;
+    if (action.type === "add") {
+      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
+      strokes.push(action.stroke);
+      this.allStrokes.set(action.pageIndex, strokes);
+      const b = this.bindingForPageIndex(action.pageIndex);
+      if (b) this.redraw(b);
+      this.scheduleAutosave();
+    } else {
+      // erase redo: remove the strokes again
+      const toRemove = new Set(action.strokes);
+      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
+      this.allStrokes.set(action.pageIndex, strokes.filter((s) => !toRemove.has(s)));
+      const b = this.bindingForPageIndex(action.pageIndex);
+      if (b) this.redraw(b);
+      if (action.anyBaked) {
+        this.scheduleBakedRewrite();
+      } else {
+        this.scheduleAutosave();
+      }
+    }
   }
 
   private redraw(b: PageBinding) {
