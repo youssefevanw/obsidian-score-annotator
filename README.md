@@ -1,30 +1,52 @@
 # ScoreAnnotator
 
-Obsidian plugin for freehand annotation on PDFs. Strokes are written as standard **InkAnnotations** (PDF spec §12.5.6.13) using [pdf-lib](https://pdf-lib.js.org), so they display in any PDF reader — Preview, Acrobat, forScore, etc. — and can be erased and redrawn after saving.
+Obsidian plugin for freehand annotation on PDFs, built for marking up music scores. Works on any PDF.
 
-Built for marking up music scores. Works on any PDF.
-
-## Status
-
-v0.2 — functional. See [Known limitations](#known-limitations).
+Strokes are saved into the PDF as standard **InkAnnotations** (via [pdf-lib](https://pdf-lib.js.org)), so they display in any PDF reader — Preview, Acrobat, forScore — and remain **editable and erasable** inside Obsidian, even across sessions.
 
 ## Features
 
-- **Pen tool** — pressure-sensitive strokes via [perfect-freehand](https://github.com/steveruizok/perfect-freehand). Line weight follows Wacom/Apple Pencil pressure; mouse draws uniform-width strokes. Hairline pen available (0.5 pt).
-- **Highlighter tool** — uniform semi-transparent strokes (marker look; no pressure thinning).
-- **Eraser** — removes whole strokes by touch. One erase gesture = one undo step.
-- **Undo / Redo** — Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z. Baked strokes that are undone-and-erased retrigger the PDF rewrite automatically.
-- **5 color swatches** with color picker. Swatches persist for the session.
-- **Width dots** — per-tool stroke width presets shown as filled circles at actual stroke size.
-  - Pen: 0.5 / 1 / 2 / 3.5 / 6 pt
-  - Highlighter: 6 / 12 / 20 pt
-- **Opacity chips** — highlighter-only; 25 / 50 / 75% rendered in the active color.
-- **Stylus-always-on** — Wacom / Apple Pencil draws without toggling annotation mode; trackpad and touch scroll still work. Palm rejection: touch is ignored while a pen stroke is in progress.
-- **Paper canvas** — create blank, staff-paper, dot-grid, or graph-paper PDFs from the command palette. Add Page button appends a new page with the same layout.
-- Handles rotated pages (0 / 90 / 180 / 270°).
-- Autosaves unsaved work to a JSON sidecar; restores on reopen.
-- One-time `.bak` of the original PDF on first save.
-- Coexists with PDF++ (Cmd/Ctrl+S only claimed when needed; toolbar offset below PDF++ toolbar).
+**Ink**
+- Pressure-sensitive pen with smoothed, variable-width strokes ([perfect-freehand](https://github.com/steveruizok/perfect-freehand)) — handwriting from a Wacom or other stylus looks like handwriting
+- Full tablet sample rate via coalesced pointer events
+- Uniform-width highlighter with adjustable opacity
+- 5 pen sizes down to a 0.5pt hairline; 3 highlighter sizes
+- 5 customizable color slots
+
+**Erasing**
+- Segment eraser: removes only the part of a stroke it touches, splitting the rest into surviving fragments
+- Works on fresh strokes *and* strokes saved in previous sessions (the PDF is rewritten without them)
+- Three eraser sizes, independent of pen width
+- Temporary eraser while holding `X` — releases back to your ink tool as soon as you let go
+
+**Workflow**
+- Stylus always draws — no mode toggle needed. The Pan/Draw toggle only affects mouse and touch input
+- Undo / redo (`Cmd+Z` / `Cmd+Shift+Z`), including erases and erases of previously saved strokes
+- Autosaves unsaved work to a JSON sidecar; restores on reopen
+- One-time `.bak` of the original PDF on first save
+- Blank paper canvases (staff paper and more) generated in-vault, with an **Add Page** button to append matching pages
+- Coexists with PDF++
+
+## Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `B` | Pen |
+| `H` | Highlighter |
+| `1`–`5` | Color slot 1–5 |
+| `Q` `W` `E` `R` `T` | Size preset 1–5 for the active tool (highlighter and eraser use `Q`–`E`) |
+| hold `X` | Temporary eraser (releases back to your ink tool) |
+| `Cmd/Ctrl+Z` | Undo |
+| `Cmd/Ctrl+Shift+Z` | Redo |
+| `Cmd/Ctrl+S` | Save annotations into the PDF |
+
+Color slots: single-click to select, double-click (or long-press) to edit the color.
+
+## Stylus support
+
+Pointer Events API — Wacom tablets, Apple Pencil, and other styluses work without configuration. Pen input draws immediately, whether or not draw mode is on; palm touches are ignored while the pen is down.
+
+The plugin doesn't read a stylus's physical eraser end as a separate input — the temporary eraser is triggered by holding `X`. If your tablet software supports mapping a pen button or an ExpressKey to a keystroke, mapping one to `X` gives you a press-and-hold hardware eraser.
 
 ## Install
 
@@ -35,7 +57,7 @@ Not yet in the Community Plugins browser. Manual install:
 3. Copy `main.js`, `manifest.json`, and `styles.css` into `<your-vault>/.obsidian/plugins/score-annotator/`
 4. In Obsidian: Settings → Community Plugins → enable **ScoreAnnotator**
 
-For development, symlink the build output directly into your vault:
+For development, symlink the repo into your vault so each `npm run build` goes live:
 
 ```sh
 ln -s "$(pwd)" "<your-vault>/.obsidian/plugins/score-annotator"
@@ -43,58 +65,36 @@ ln -s "$(pwd)" "<your-vault>/.obsidian/plugins/score-annotator"
 
 ## Usage
 
-1. Open a PDF in Obsidian. A floating toolbar appears at the top-right of the pane.
-2. Pick **Pen**, **Highlighter**, or **Eraser** from the toolbar.
-3. Stylus users: touch the page — annotation mode activates automatically for pen input. Mouse/touch users: click **Annotate** first.
-4. Select a color swatch, width dot, and (highlighter) opacity chip.
-5. Draw on the page. Pressure from Wacom and Apple Pencil varies the line weight.
-6. Press **Cmd/Ctrl+Z** to undo, **Cmd/Ctrl+Shift+Z** to redo.
-7. Press **Cmd/Ctrl+S** or click **Save** to bake strokes into the PDF as InkAnnotations.
+1. Open a PDF. The floating toolbar appears in the top-right of the pane.
+2. Write with a stylus immediately, or click the Pan/Draw toggle to draw with a mouse.
+3. Pick tool, color, and size — by toolbar or keyboard.
+4. Erase by selecting the eraser tool or holding `X`. Erasing a previously saved stroke rewrites the PDF (you'll see a "PDF updated" notice).
+5. `Cmd/Ctrl+S` or the Save button bakes current strokes into the PDF.
 
-Outside annotation mode, the overlay passes pointer input through to Obsidian — you can scroll and select text normally.
-
-### Erasing a baked stroke
-
-When you erase a stroke that was already saved in the PDF, the plugin rewrites the PDF in the background (≈ 800 ms debounce). A "PDF updated" notice confirms the write. The stroke is then gone from both the canvas and the PDF. Cmd+Z after an erase restores the stroke; if it was baked, the PDF is rewritten again to include it.
+**Paper canvases:** run the command **ScoreAnnotator: New paper canvas** to generate a blank staff-paper PDF in your vault. Generated PDFs get an extra **Add Page** toolbar button that appends a page with the same layout.
 
 ## Files written next to the PDF
 
-- `<filename>.pdf.bak` — created on your first save; contains the original unannotated PDF. Subsequent saves don't touch it.
-- `<filename>.pdf.scoreannotator.json` — autosave sidecar for unsaved strokes. Written ~500 ms after each stroke, deleted after a successful save.
+- `<filename>.pdf.bak` — created on your first save; the original unannotated PDF. Never touched again.
+- `<filename>.pdf.scoreannotator.json` — autosave sidecar for unsaved strokes. Written ~500ms after each stroke, deleted after a successful save.
 
 ## How annotations are stored
 
-Strokes are saved as **InkAnnotations** (not embedded in the page content stream), so:
+Each stroke is a PDF **InkAnnotation**:
 
-- **Editable / erasable after saving** — reopen in ScoreAnnotator, erase, redraw, save again.
-- **External viewer support** — every annotation has a pre-rendered `/AP /N` appearance stream, so Preview, forScore, Acrobat, and other viewers display the strokes without needing to understand InkAnnotations.
-- **Variable-width pen** — the appearance stream uses the perfect-freehand outline polygon (not a stroked polyline), so external viewers see the same pressure-sensitive strokes as the overlay canvas.
-- **Highlighter** — stored as stroked-polyline appearance with opacity; looks like a marker in all viewers.
-- **Pressure data** — stored in a custom `/SAPress` array on the annotation. Old viewers ignore unknown keys and render the appearance stream normally.
+- `/InkList` holds the stroke's centerline points (standard, readable by any PDF tool)
+- `/SAPress` (custom key) holds per-point pressure; `/SAKind` distinguishes pen from highlighter
+- The appearance stream (`/AP /N`) contains the rendered ink — a filled variable-width outline for pressure strokes, a stroked polyline for highlighter — so external viewers show exactly what you drew
+- Each annotation carries a marker key (`/SAv`) and `/T` set to `ScoreAnnotator`, so the plugin can find, strip, and rewrite only its own ink idempotently on every save; strokes from other tools are never touched
 
-## Coexistence with PDF++
-
-- The toolbar sits 96 px from the top of the PDF pane so it doesn't overlap PDF++'s toolbar.
-- Cmd/Ctrl+S is only claimed when annotation mode is on **or** there are unsaved strokes.
-- The plugin doesn't register a PDF view type — it layers on top of whichever viewer is rendering the PDF.
+Because strokes are annotations rather than page content, the plugin can read them back on reopen and let you erase them later. Rotated pages (`/Rotate` 90/180/270) are handled in both directions.
 
 ## Known limitations
 
-- **Undo across saves is partial** — undoing an `add` action after saving removes the stroke from the overlay but not from the PDF (the baked copy remains). Erase the stroke normally if you need it out of the saved PDF.
-- **Password-protected / encrypted PDFs** — pdf-lib limitation; save fails with "see console."
-- **Renaming or moving a PDF** doesn't move its sidecar JSON. Save first, then rename.
-- **Stroke width vs zoom** — stroke width is in PDF points (1 pt = 1/72 inch); the overlay renders the same number as CSS pixels, so visual thickness vs. saved thickness can drift at non-100% zoom. The appearance stream in the PDF is always correct.
-
-## Build from source
-
-```sh
-npm install
-npm run build    # production build → main.js
-npm run dev      # esbuild watch mode
-```
-
-Requires Node 18+.
+- Settings (colors, sizes) are per-session, not persisted
+- No lasso/select or move of existing strokes
+- One annotating view per PDF at a time behaves best
 
 ## License
 
-TBD.
+MIT
