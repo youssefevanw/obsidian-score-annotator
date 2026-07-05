@@ -34,7 +34,7 @@ export interface ToolbarOpts {
 // Opacity presets for the highlighter (pen is always 1.0).
 const HIGHLIGHTER_OPACITIES = [0.25, 0.5, 0.75] as const;
 
-const SWATCH_COUNT = 5;
+const SWATCH_COUNT = 6;
 
 // Q W E R T labels, in preset order — must match SIZE_KEY_CODES in
 // overlay.ts so tooltips reflect the keys that actually work.

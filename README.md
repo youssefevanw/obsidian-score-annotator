@@ -11,7 +11,7 @@ Strokes are saved into the PDF as standard **InkAnnotations** (via [pdf-lib](htt
 - Full tablet sample rate via coalesced pointer events
 - Uniform-width highlighter with adjustable opacity
 - 5 pen sizes down to a 0.5pt hairline; 3 highlighter sizes
-- 5 customizable color slots
+- 6 customizable color slots
 
 **Erasing**
 - Segment eraser: removes only the part of a stroke it touches, splitting the rest into surviving fragments
@@ -33,7 +33,7 @@ Strokes are saved into the PDF as standard **InkAnnotations** (via [pdf-lib](htt
 |---|---|
 | `B` | Pen |
 | `H` | Highlighter |
-| `1`–`5` | Color slot 1–5 |
+| `1`–`6` | Color slot 1–6 |
 | `Q` `W` `E` `R` `T` | Size preset 1–5 for the active tool (highlighter and eraser use `Q`–`E`) |
 | hold `X` | Temporary eraser (releases back to your ink tool) |
 | `Cmd/Ctrl+Z` | Undo |

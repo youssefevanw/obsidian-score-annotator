@@ -20,6 +20,7 @@ const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#1d3557",
   "#f4a261",
   "#000000",
+  "#7C3AED",
 ];
 
 // Q W E R T, in preset order — index i always maps to presets[i] for
@@ -188,7 +189,7 @@ export class OverlayController {
       if (this.isTextInputFocused()) return;
       if (e.repeat) return;
 
-      const colorMatch = /^Digit([1-5])$/.exec(e.code);
+      const colorMatch = /^Digit([1-6])$/.exec(e.code);
       if (colorMatch) {
         const idx = Number(colorMatch[1]) - 1;
         if (idx < this.colors.length) {
