@@ -8,9 +8,9 @@ export default class ScoreAnnotatorPlugin extends Plugin {
 
   async onload() {
     this.addCommand({
-      id: "toggle-annotation-mode",
-      name: "Toggle annotation mode",
-      callback: () => this.getActiveController()?.toggleActive(),
+      id: "toggle-draw-mode",
+      name: "Toggle draw/pan mode",
+      callback: () => this.getActiveController()?.toggleDrawMode(),
     });
 
     this.addCommand({

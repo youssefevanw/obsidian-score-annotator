@@ -12,6 +12,7 @@ import {
 } from "./paper-generator";
 import { History } from "./history";
 import { paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
+import { ERASER_RADII, HIGHLIGHTER_WIDTHS, PEN_WIDTHS } from "./presets";
 
 const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#e63946",
@@ -21,6 +22,11 @@ const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#000000",
 ];
 
+// Q W E R T, in preset order — index i always maps to presets[i] for
+// whichever tool is active (toolbar.ts's width-dot titles use the same
+// labels so the on-screen hint matches).
+const SIZE_KEY_CODES: readonly string[] = ["KeyQ", "KeyW", "KeyE", "KeyR", "KeyT"];
+
 interface PageBinding {
   pageEl: HTMLElement;
   canvas: HTMLCanvasElement;
@@ -29,7 +35,11 @@ interface PageBinding {
   resizeObserver: ResizeObserver;
   inkObserver: MutationObserver;
   currentStroke: Stroke | null;
-  erasedInGesture: Stroke[];   // strokes removed during current erase gesture
+  // Pre-gesture strokes touched by the eraser this gesture (restored on undo).
+  eraseRemoved: Set<Stroke>;
+  // Fragments created by this gesture that are still alive in allStrokes
+  // (i.e. not themselves erased further within the same gesture).
+  eraseAdded: Set<Stroke>;
   anyBakedErased: boolean;     // whether any baked stroke was erased in this gesture
 }
 
@@ -39,7 +49,9 @@ const SIDECAR_RETRY_DELAY_MS = 100;
 const SCROLL_BUFFER_PX = 1000; // bind canvases this far above/below viewport
 
 export class OverlayController {
-  private active = false;
+  // Pan/Draw mode. Only gates mouse/touch — pen always draws, and the
+  // eraser override (hardware eraser tip / hold-X) works in both modes.
+  private drawMode = false;
   private tool: Tool = "pen";
   private colors: string[] = DEFAULT_SWATCH_COLORS.slice();
   private activeColorIndex = 0;
@@ -47,6 +59,10 @@ export class OverlayController {
   private penOpacity = 1;
   private highlighterWidth = 12;
   private highlighterOpacity = 0.5;
+  private eraserRadius = 16;
+  // Temporary eraser override while the hold-key is held. Never mutates
+  // `tool` — gestures started while true just run the eraser path.
+  private eraserKeyHeld = false;
   // Non-null only when the open PDF is one we generated. Drives the
   // visibility of the "Add Page" button and remembers the staff count so
   // appended pages match the original layout.
@@ -81,6 +97,9 @@ export class OverlayController {
   private penStrokeActive = false;
   private history = new History();
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+  private eraserKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
+  private eraserKeyupHandler: ((e: KeyboardEvent) => void) | null = null;
+  private eraserKeyBlurHandler: (() => void) | null = null;
   private scrollHandler: (() => void) | null = null;
   private autosaveTimer: number | null = null;
   private saving = false;
@@ -94,8 +113,8 @@ export class OverlayController {
     this.toolbar?.destroy();
     this.toolbarHasAddPage = withAddPage;
     this.toolbar = new Toolbar(root, {
-      isActive: () => this.active,
-      onToggle: () => this.toggleActive(),
+      isDrawMode: () => this.drawMode,
+      onToggleDrawMode: () => this.toggleDrawMode(),
       getTool: () => this.tool,
       setTool: (t) => (this.tool = t),
       getColors: () => this.colors,
@@ -112,6 +131,9 @@ export class OverlayController {
       setHighlighterWidth: (w) => (this.highlighterWidth = w),
       getHighlighterOpacity: () => this.highlighterOpacity,
       setHighlighterOpacity: (o) => (this.highlighterOpacity = o),
+      getEraserRadius: () => this.eraserRadius,
+      setEraserRadius: (r) => (this.eraserRadius = r),
+      isEraserOverride: () => this.eraserKeyHeld,
       onSave: () => void this.save(),
       onAddPage: withAddPage ? () => void this.addPage() : undefined,
     });
@@ -135,26 +157,109 @@ export class OverlayController {
 
     this.keydownHandler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
-      if (!meta) return;
-      const key = e.key.toLowerCase();
-      if (key === "s") {
-        if (!this.active && !this.hasUnsavedStrokes()) return;
+      if (meta) {
+        const key = e.key.toLowerCase();
+        if (key === "s") {
+          if (!this.drawMode && !this.hasUnsavedStrokes()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          void this.save();
+        } else if (key === "z" && !e.shiftKey) {
+          if (!this.history.canUndo()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          this.applyUndo();
+        } else if (key === "z" && e.shiftKey) {
+          if (!this.history.canRedo()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          this.applyRedo();
+        }
+        return;
+      }
+
+      // Single-key tool/color/size shortcuts. Shift is fine (matched via
+      // e.code so it's Shift-invariant); any other modifier, or focus in a
+      // text input, and we leave the key alone.
+      if (e.altKey) return;
+      if (this.isTextInputFocused()) return;
+      if (e.repeat) return;
+
+      const colorMatch = /^Digit([1-5])$/.exec(e.code);
+      if (colorMatch) {
+        const idx = Number(colorMatch[1]) - 1;
+        if (idx < this.colors.length) {
+          this.activeColorIndex = idx;
+          this.toolbar?.refresh();
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      const sizeIdx = SIZE_KEY_CODES.indexOf(e.code);
+      if (sizeIdx !== -1) {
+        const presets =
+          this.tool === "eraser"
+            ? ERASER_RADII
+            : this.tool === "highlighter"
+              ? HIGHLIGHTER_WIDTHS
+              : PEN_WIDTHS;
+        if (sizeIdx < presets.length) {
+          const w = presets[sizeIdx];
+          if (this.tool === "eraser") this.eraserRadius = w;
+          else if (this.tool === "highlighter") this.highlighterWidth = w;
+          else this.penWidth = w;
+          this.toolbar?.refresh();
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      if (e.code === "KeyB") {
+        this.tool = "pen";
+        this.toolbar?.refresh();
         e.preventDefault();
         e.stopPropagation();
-        void this.save();
-      } else if (key === "z" && !e.shiftKey) {
-        if (!this.history.canUndo()) return;
+        return;
+      }
+      if (e.code === "KeyH") {
+        this.tool = "highlighter";
+        this.toolbar?.refresh();
         e.preventDefault();
         e.stopPropagation();
-        this.applyUndo();
-      } else if (key === "z" && e.shiftKey) {
-        if (!this.history.canRedo()) return;
-        e.preventDefault();
-        e.stopPropagation();
-        this.applyRedo();
+        return;
       }
     };
     root.addEventListener("keydown", this.keydownHandler, true);
+
+    // Hold-key eraser override (default "x" — "e" is taken by the size-3
+    // shortcut above). Decided per-gesture at pointerdown — holding/
+    // releasing never touches `tool` and never switches mid-stroke.
+    this.eraserKeydownHandler = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.code !== "KeyX") return;
+      if (this.isTextInputFocused()) return;
+      this.eraserKeyHeld = true;
+      this.toolbar?.refresh();
+    };
+    this.eraserKeyupHandler = (e: KeyboardEvent) => {
+      if (e.code !== "KeyX") return;
+      this.eraserKeyHeld = false;
+      this.toolbar?.refresh();
+    };
+    // Defensive reset: if focus leaves the window while the key is held
+    // (alt-tab, etc.), the keyup event may never arrive.
+    this.eraserKeyBlurHandler = () => {
+      if (!this.eraserKeyHeld) return;
+      this.eraserKeyHeld = false;
+      this.toolbar?.refresh();
+    };
+    root.addEventListener("keydown", this.eraserKeydownHandler);
+    root.addEventListener("keyup", this.eraserKeyupHandler);
+    window.addEventListener("blur", this.eraserKeyBlurHandler);
 
     void this.loadInitialStateWhenReady();
 
@@ -203,6 +308,25 @@ export class OverlayController {
       );
       this.keydownHandler = null;
     }
+    if (this.eraserKeydownHandler) {
+      this.leaf.view.containerEl.removeEventListener(
+        "keydown",
+        this.eraserKeydownHandler,
+      );
+      this.eraserKeydownHandler = null;
+    }
+    if (this.eraserKeyupHandler) {
+      this.leaf.view.containerEl.removeEventListener(
+        "keyup",
+        this.eraserKeyupHandler,
+      );
+      this.eraserKeyupHandler = null;
+    }
+    if (this.eraserKeyBlurHandler) {
+      window.removeEventListener("blur", this.eraserKeyBlurHandler);
+      this.eraserKeyBlurHandler = null;
+    }
+    this.eraserKeyHeld = false;
     for (const binding of this.bindings.values()) {
       binding.resizeObserver.disconnect();
       binding.canvas.remove();
@@ -210,10 +334,10 @@ export class OverlayController {
     this.bindings.clear();
   }
 
-  toggleActive() {
-    this.active = !this.active;
+  toggleDrawMode() {
+    this.drawMode = !this.drawMode;
     for (const b of this.bindings.values()) {
-      b.canvas.classList.toggle("score-annotator-active", this.active);
+      b.canvas.classList.toggle("score-annotator-draw-mode", this.drawMode);
     }
     this.toolbar?.refresh();
   }
@@ -495,7 +619,7 @@ export class OverlayController {
     }
     const canvas = document.createElement("canvas");
     canvas.className = "score-annotator-overlay";
-    if (this.active) canvas.classList.add("score-annotator-active");
+    if (this.drawMode) canvas.classList.add("score-annotator-draw-mode");
     pageEl.appendChild(canvas);
 
     const ctx = canvas.getContext("2d");
@@ -517,7 +641,8 @@ export class OverlayController {
         this.hideInkInPage(pageEl);
       }),
       currentStroke: null,
-      erasedInGesture: [],
+      eraseRemoved: new Set(),
+      eraseAdded: new Set(),
       anyBakedErased: false,
     };
     binding.resizeObserver.observe(pageEl);
@@ -608,6 +733,13 @@ export class OverlayController {
     this.redraw(b);
   }
 
+  private isTextInputFocused(): boolean {
+    const el = document.activeElement;
+    if (!el) return false;
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") return true;
+    return (el as HTMLElement).isContentEditable === true;
+  }
+
   private pointFromEvent(e: PointerEvent, b: PageBinding): Point {
     const rect = b.canvas.getBoundingClientRect();
     const w = rect.width || 1;
@@ -621,14 +753,20 @@ export class OverlayController {
   private onPointerDown(e: PointerEvent, b: PageBinding) {
     // Palm rejection: a resting hand touch must not start a stroke while pen is drawing.
     if (e.pointerType === "touch" && this.penStrokeActive) return;
-    // Pen draws unconditionally; mouse/touch require annotation mode.
-    if (!this.active && e.pointerType !== "pen") return;
+    // Tool for this gesture is decided once, here. The hold-key override
+    // never mutates `tool` — keyup mid-stroke must not switch tools.
+    const erasing = this.eraserKeyHeld || this.tool === "eraser";
+    // Pen always draws. Mouse/touch only draw in draw mode — except the
+    // eraser override, which must work in pan mode too so erasing never
+    // requires switching modes first.
+    if (e.pointerType !== "pen" && !this.drawMode && !erasing) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (b.canvas.width === 0 || b.canvas.height === 0) this.resizeCanvas(b);
     b.canvas.setPointerCapture(e.pointerId);
     const p = this.pointFromEvent(e, b);
-    if (this.tool === "eraser") {
-      b.erasedInGesture = [];
+    if (erasing) {
+      b.eraseRemoved = new Set();
+      b.eraseAdded = new Set();
       b.anyBakedErased = false;
       this.eraseAt(p, b);
       b.currentStroke = {
@@ -656,7 +794,12 @@ export class OverlayController {
   }
 
   private onPointerMove(e: PointerEvent, b: PageBinding) {
-    if (!b.currentStroke) return;
+    if (!b.currentStroke) {
+      // Hover only (no gesture in progress): keep the cursor's crosshair
+      // in sync with "can this input draw right now" — pen always can.
+      b.canvas.classList.toggle("score-annotator-pen-hover", e.pointerType === "pen");
+      return;
+    }
     // Palm rejection during pen stroke.
     if (e.pointerType === "touch" && this.penStrokeActive) {
       e.preventDefault();
@@ -688,15 +831,20 @@ export class OverlayController {
       strokes.push(b.currentStroke);
       this.allStrokes.set(b.pageIndex, strokes);
       this.history.push({ type: "add", pageIndex: b.pageIndex, stroke: b.currentStroke });
-    } else if (wasEraser && b.erasedInGesture.length > 0) {
+    } else if (
+      wasEraser &&
+      (b.eraseRemoved.size > 0 || b.eraseAdded.size > 0)
+    ) {
       // One erase gesture → one history entry (undo restores all at once).
       this.history.push({
         type: "erase",
         pageIndex: b.pageIndex,
-        strokes: b.erasedInGesture.slice(),
+        removed: Array.from(b.eraseRemoved),
+        added: Array.from(b.eraseAdded),
         anyBaked: b.anyBakedErased,
       });
-      b.erasedInGesture = [];
+      b.eraseRemoved = new Set();
+      b.eraseAdded = new Set();
       b.anyBakedErased = false;
     }
     if (e.pointerType === "pen") this.penStrokeActive = false;
@@ -731,29 +879,88 @@ export class OverlayController {
     }
   }
 
+  // Segment eraser: removes only the points (and thin-stroke segments)
+  // inside the eraser radius, splitting each touched stroke's survivors
+  // into contiguous runs that become their own strokes. A stroke with
+  // nothing hit is left untouched (same object, not replaced).
   private eraseAt(p: Point, b: PageBinding) {
     const rect = b.canvas.getBoundingClientRect();
     const w = rect.width || 1;
     const h = rect.height || 1;
-    const radiusCss = Math.max(8, this.penWidth * 2);
-    const r2 = radiusCss * radiusCss;
+    const r2 = this.eraserRadius * this.eraserRadius;
     const strokes = this.allStrokes.get(b.pageIndex) ?? [];
-    const filtered: Stroke[] = [];
+    const next: Stroke[] = [];
+
+    const hitPos = (x: number, y: number) => {
+      const dx = (x - p.x) * w;
+      const dy = (y - p.y) * h;
+      return dx * dx + dy * dy <= r2;
+    };
+
     for (const s of strokes) {
-      let hit = false;
-      for (const sp of s.points) {
-        const dx = (sp.x - p.x) * w;
-        const dy = (sp.y - p.y) * h;
-        if (dx * dx + dy * dy <= r2) { hit = true; break; }
+      const pts = s.points;
+      const n = pts.length;
+      const hitPoint = new Array<boolean>(n);
+      let anyHit = false;
+      for (let i = 0; i < n; i++) {
+        hitPoint[i] = hitPos(pts[i].x, pts[i].y);
+        if (hitPoint[i]) anyHit = true;
       }
-      if (hit) {
-        if (this.bakedStrokes.has(s)) b.anyBakedErased = true;
-        b.erasedInGesture.push(s);
+      // Also test segment midpoints so fast, sparsely-sampled strokes can't
+      // slip a whole segment through the eraser gap between two points.
+      const cutAfter = new Array<boolean>(Math.max(0, n - 1)).fill(false);
+      for (let i = 0; i < n - 1; i++) {
+        if (hitPoint[i] || hitPoint[i + 1]) continue;
+        const mx = (pts[i].x + pts[i + 1].x) / 2;
+        const my = (pts[i].y + pts[i + 1].y) / 2;
+        if (hitPos(mx, my)) {
+          cutAfter[i] = true;
+          anyHit = true;
+        }
+      }
+
+      if (!anyHit) {
+        next.push(s);
+        continue;
+      }
+
+      // Bookkeeping: a fragment created earlier in this same gesture that
+      // gets erased further is dropped from `added` rather than recorded
+      // in `removed` — undo should only ever restore pre-gesture strokes.
+      if (b.eraseAdded.has(s)) {
+        b.eraseAdded.delete(s);
       } else {
-        filtered.push(s);
+        b.eraseRemoved.add(s);
+        if (this.bakedStrokes.has(s)) b.anyBakedErased = true;
+      }
+
+      let current: Point[] = [];
+      const runs: Point[][] = [];
+      for (let i = 0; i < n; i++) {
+        if (hitPoint[i]) {
+          if (current.length) runs.push(current);
+          current = [];
+          continue;
+        }
+        current.push(pts[i]);
+        if (cutAfter[i]) {
+          runs.push(current);
+          current = [];
+        }
+      }
+      if (current.length) runs.push(current);
+
+      for (const run of runs) {
+        if (run.length < 2) continue;
+        // New object identity — never in bakedStrokes, so it renders via
+        // the overlay and saves fresh, same as any other unbaked stroke.
+        const fragment: Stroke = { ...s, points: run };
+        b.eraseAdded.add(fragment);
+        next.push(fragment);
       }
     }
-    this.allStrokes.set(b.pageIndex, filtered);
+
+    this.allStrokes.set(b.pageIndex, next);
     // Baked strokes are painted by PDF.js from /AP /N; removing them from
     // our memory doesn't make them disappear visually. Trigger a debounced
     // re-save so the PDF gets rewritten without them and PDF.js reloads.
@@ -782,9 +989,12 @@ export class OverlayController {
       if (b) this.redraw(b);
       this.scheduleAutosave();
     } else {
-      // erase undo: re-insert the removed strokes
-      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
-      strokes.push(...action.strokes);
+      // erase undo: drop this gesture's fragments, restore the originals
+      const toRemove = new Set(action.added);
+      const strokes = (this.allStrokes.get(action.pageIndex) ?? []).filter(
+        (s) => !toRemove.has(s),
+      );
+      strokes.push(...action.removed);
       this.allStrokes.set(action.pageIndex, strokes);
       const b = this.bindingForPageIndex(action.pageIndex);
       if (b) this.redraw(b);
@@ -808,10 +1018,13 @@ export class OverlayController {
       if (b) this.redraw(b);
       this.scheduleAutosave();
     } else {
-      // erase redo: remove the strokes again
-      const toRemove = new Set(action.strokes);
-      const strokes = this.allStrokes.get(action.pageIndex) ?? [];
-      this.allStrokes.set(action.pageIndex, strokes.filter((s) => !toRemove.has(s)));
+      // erase redo: remove the originals again, bring the fragments back
+      const toRemove = new Set(action.removed);
+      const strokes = (this.allStrokes.get(action.pageIndex) ?? []).filter(
+        (s) => !toRemove.has(s),
+      );
+      strokes.push(...action.added);
+      this.allStrokes.set(action.pageIndex, strokes);
       const b = this.bindingForPageIndex(action.pageIndex);
       if (b) this.redraw(b);
       if (action.anyBaked) {

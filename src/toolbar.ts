@@ -1,9 +1,10 @@
 import { setIcon } from "obsidian";
 import { Tool } from "./types";
+import { ERASER_RADII, HIGHLIGHTER_WIDTHS, PEN_WIDTHS } from "./presets";
 
 export interface ToolbarOpts {
-  isActive: () => boolean;
-  onToggle: () => void;
+  isDrawMode: () => boolean;
+  onToggleDrawMode: () => void;
 
   getTool: () => Tool;
   setTool: (t: Tool) => void;
@@ -19,19 +20,28 @@ export interface ToolbarOpts {
   setHighlighterWidth: (w: number) => void;
   getHighlighterOpacity: () => number;
   setHighlighterOpacity: (o: number) => void;
+  getEraserRadius: () => number;
+  setEraserRadius: (r: number) => void;
+
+  // True while the hold-key eraser override is active. Drives the eraser
+  // button highlight without touching getTool()'s value.
+  isEraserOverride: () => boolean;
 
   onSave: () => void;
   onAddPage?: () => void;
 }
 
-// Width presets per tool (in PDF points / CSS px).
-const PEN_WIDTHS = [0.5, 1, 2, 3.5, 6] as const;
-const HIGHLIGHTER_WIDTHS = [6, 12, 20] as const;
-
 // Opacity presets for the highlighter (pen is always 1.0).
 const HIGHLIGHTER_OPACITIES = [0.25, 0.5, 0.75] as const;
 
 const SWATCH_COUNT = 5;
+
+// Q W E R T labels, in preset order — must match SIZE_KEY_CODES in
+// overlay.ts so tooltips reflect the keys that actually work.
+const SIZE_KEY_LABELS = ["Q", "W", "E", "R", "T"] as const;
+
+const SWATCH_HOLD_MS = 500;
+const SWATCH_HOLD_TOLERANCE_PX = 4;
 
 export class Toolbar {
   private root: HTMLDivElement;
@@ -39,7 +49,8 @@ export class Toolbar {
   private penBtn!: HTMLButtonElement;
   private highlighterBtn!: HTMLButtonElement;
   private eraserBtn!: HTMLButtonElement;
-  private swatches: HTMLInputElement[] = [];
+  private swatches: HTMLButtonElement[] = [];
+  private colorInput!: HTMLInputElement;
   private widthDotsEl!: HTMLDivElement;
   private widthDots: HTMLButtonElement[] = [];
   private opacityChipsEl!: HTMLDivElement;
@@ -54,24 +65,35 @@ export class Toolbar {
 
   destroy() {
     this.root.remove();
+    this.colorInput.remove();
   }
 
   refresh() {
-    const active = this.opts.isActive();
-    this.toggleBtn.classList.toggle("is-active", active);
-    this.toggleBtn.title = active ? "Annotating (click to stop)" : "Annotate";
+    const drawMode = this.opts.isDrawMode();
+    setIcon(this.toggleBtn, drawMode ? "pencil" : "hand");
+    this.toggleBtn.classList.toggle("is-active", drawMode);
+    this.toggleBtn.title = drawMode
+      ? "Draw mode (mouse/touch) — stylus always draws"
+      : "Pan mode (mouse/touch) — stylus always draws";
+    this.toggleBtn.setAttribute("aria-label", this.toggleBtn.title);
 
     const tool = this.opts.getTool();
-    this.penBtn.classList.toggle("is-active", tool === "pen");
-    this.highlighterBtn.classList.toggle("is-active", tool === "highlighter");
-    this.eraserBtn.classList.toggle("is-active", tool === "eraser");
+    const eraserOverride = this.opts.isEraserOverride();
+    this.penBtn.classList.toggle("is-active", !eraserOverride && tool === "pen");
+    this.highlighterBtn.classList.toggle(
+      "is-active",
+      !eraserOverride && tool === "highlighter",
+    );
+    this.eraserBtn.classList.toggle(
+      "is-active",
+      eraserOverride || tool === "eraser",
+    );
 
     const colors = this.opts.getColors();
     const activeIdx = this.opts.getActiveColorIndex();
     for (let i = 0; i < this.swatches.length; i++) {
       const sw = this.swatches[i];
-      const target = colors[i];
-      if (target && sw.value !== target) sw.value = target;
+      sw.style.background = colors[i] ?? "#000000";
       sw.classList.toggle("is-active", i === activeIdx);
     }
 
@@ -80,35 +102,51 @@ export class Toolbar {
   }
 
   private refreshWidthDots(tool: Tool) {
-    const presets = tool === "highlighter" ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS;
+    const presets =
+      tool === "highlighter"
+        ? HIGHLIGHTER_WIDTHS
+        : tool === "eraser"
+          ? ERASER_RADII
+          : PEN_WIDTHS;
     const current =
       tool === "highlighter"
         ? this.opts.getHighlighterWidth()
-        : this.opts.getPenWidth();
+        : tool === "eraser"
+          ? this.opts.getEraserRadius()
+          : this.opts.getPenWidth();
 
-    // Rebuild the dot row only when the preset set has changed length
-    // (pen↔highlighter switch). Using data attribute to track.
-    const currentLen = this.widthDotsEl.dataset.len ?? "";
-    if (currentLen !== String(presets.length)) {
+    // Rebuild the dot row only when the preset set actually changed. Keyed
+    // by the preset values themselves (not just length) — highlighter and
+    // eraser both have 3 presets, so a length-only check would miss the
+    // switch between them.
+    const unit = tool === "eraser" ? "px" : "pt";
+    const key = presets.join(",");
+    if (this.widthDotsEl.dataset.key !== key) {
       this.widthDotsEl.innerHTML = "";
       this.widthDots = [];
-      for (const w of presets) {
+      presets.forEach((w, i) => {
         const btn = document.createElement("button");
         btn.className = "score-annotator-width-dot";
-        btn.title = `${w} pt`;
+        btn.title = `${w} ${unit} — key: ${SIZE_KEY_LABELS[i]}`;
         btn.dataset.width = String(w);
 
         const inner = document.createElement("span");
         inner.className = "score-annotator-width-dot-inner";
-        // Visible diameter: actual stroke width, minimum 2px so hairline shows.
-        const sizePx = Math.max(2, w);
+        // Visible diameter: actual stroke width for pen/highlighter (min
+        // 2px so hairline shows); eraser radii are much larger, so scale
+        // them down to fit the same dot button.
+        const sizePx =
+          tool === "eraser" ? Math.min(20, Math.max(4, w / 2)) : Math.max(2, w);
         inner.style.width = `${sizePx}px`;
         inner.style.height = `${sizePx}px`;
         btn.appendChild(inner);
 
         btn.addEventListener("click", () => {
-          if (this.opts.getTool() === "highlighter") {
+          const t = this.opts.getTool();
+          if (t === "highlighter") {
             this.opts.setHighlighterWidth(w);
+          } else if (t === "eraser") {
+            this.opts.setEraserRadius(w);
           } else {
             this.opts.setPenWidth(w);
           }
@@ -116,8 +154,8 @@ export class Toolbar {
         });
         this.widthDots.push(btn);
         this.widthDotsEl.appendChild(btn);
-      }
-      this.widthDotsEl.dataset.len = String(presets.length);
+      });
+      this.widthDotsEl.dataset.key = key;
     }
 
     // Mark the active dot (nearest preset to current value).
@@ -146,42 +184,85 @@ export class Toolbar {
   }
 
   private build() {
-    this.toggleBtn = this.mkBtn("pencil", "Annotate", () => {
-      this.opts.onToggle();
+    this.colorInput = document.createElement("input");
+    this.colorInput.type = "color";
+    this.colorInput.className = "score-annotator-color-input-hidden";
+    document.body.appendChild(this.colorInput);
+
+    // Icon/title are state-dependent — set for real in refresh(), called
+    // at the end of build().
+    this.toggleBtn = this.mkBtn("pencil", "", () => {
+      this.opts.onToggleDrawMode();
       this.refresh();
     });
 
-    this.penBtn = this.mkBtn("pen-tool", "Pen", () => {
+    this.penBtn = this.mkBtn("pen-tool", "Pen — key: B", () => {
       this.opts.setTool("pen");
       this.refresh();
     });
-    this.highlighterBtn = this.mkBtn("highlighter", "Highlighter", () => {
+    this.highlighterBtn = this.mkBtn("highlighter", "Highlighter — key: H", () => {
       this.opts.setTool("highlighter");
       this.refresh();
     });
-    this.eraserBtn = this.mkBtn("eraser", "Eraser", () => {
+    this.eraserBtn = this.mkBtn("eraser", "Eraser — hold: X", () => {
       this.opts.setTool("eraser");
       this.refresh();
     });
 
-    // Color swatches
+    // Color swatches — plain buttons (not <input type="color">) so a single
+    // click just selects the slot. Double-click, or a ≥500ms pointer-hold
+    // without movement, opens the OS color picker via the one hidden
+    // <input type="color"> created above.
     const swatchRow = document.createElement("div");
     swatchRow.className = "score-annotator-swatches";
     const initialColors = this.opts.getColors();
     for (let i = 0; i < SWATCH_COUNT; i++) {
-      const sw = document.createElement("input");
-      sw.type = "color";
+      const sw = document.createElement("button");
+      sw.type = "button";
       sw.className = "score-annotator-swatch";
-      sw.value = initialColors[i] ?? "#000000";
-      sw.title = `Color ${i + 1}`;
+      sw.style.background = initialColors[i] ?? "#000000";
+      sw.title = `Color ${i + 1} — key: ${i + 1}`;
+
+      let holdTimer: number | null = null;
+      let downX = 0;
+      let downY = 0;
+      const cancelHold = () => {
+        if (holdTimer !== null) {
+          window.clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+      };
+      sw.addEventListener("pointerdown", (e) => {
+        downX = e.clientX;
+        downY = e.clientY;
+        cancelHold();
+        holdTimer = window.setTimeout(() => {
+          holdTimer = null;
+          this.openColorEditor(i, sw);
+        }, SWATCH_HOLD_MS);
+      });
+      sw.addEventListener("pointermove", (e) => {
+        if (holdTimer === null) return;
+        if (
+          Math.abs(e.clientX - downX) > SWATCH_HOLD_TOLERANCE_PX ||
+          Math.abs(e.clientY - downY) > SWATCH_HOLD_TOLERANCE_PX
+        ) {
+          cancelHold();
+        }
+      });
+      sw.addEventListener("pointerup", cancelHold);
+      sw.addEventListener("pointerleave", cancelHold);
+      sw.addEventListener("pointercancel", cancelHold);
+
       sw.addEventListener("click", () => {
         this.opts.setActiveColorIndex(i);
         this.refresh();
       });
-      sw.addEventListener("input", () => {
-        this.opts.setColor(i, sw.value);
-        this.refresh(); // opacity chips may need new color
+      sw.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        this.openColorEditor(i, sw);
       });
+
       this.swatches.push(sw);
       swatchRow.appendChild(sw);
     }
@@ -238,6 +319,23 @@ export class Toolbar {
 
     this.root.append(...children);
     this.refresh();
+  }
+
+  // Opens the OS color picker for swatch slot `i`, positioning the single
+  // hidden <input type="color"> over that swatch and forwarding its input
+  // events back to the slot.
+  private openColorEditor(i: number, swatchEl: HTMLButtonElement) {
+    this.opts.setActiveColorIndex(i);
+    const rect = swatchEl.getBoundingClientRect();
+    this.colorInput.style.left = `${rect.left}px`;
+    this.colorInput.style.top = `${rect.top}px`;
+    this.colorInput.value = this.opts.getColors()[i] ?? "#000000";
+    this.colorInput.oninput = () => {
+      this.opts.setColor(i, this.colorInput.value);
+      this.refresh();
+    };
+    this.refresh();
+    this.colorInput.click();
   }
 
   private mkBtn(

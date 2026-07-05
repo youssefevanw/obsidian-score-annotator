@@ -2,7 +2,13 @@ import { Stroke } from "./types";
 
 export type HistoryAction =
   | { type: "add"; pageIndex: number; stroke: Stroke }
-  | { type: "erase"; pageIndex: number; strokes: Stroke[]; anyBaked: boolean };
+  | {
+      type: "erase";
+      pageIndex: number;
+      removed: Stroke[];
+      added: Stroke[];
+      anyBaked: boolean;
+    };
 
 const MAX_HISTORY = 100;
 
