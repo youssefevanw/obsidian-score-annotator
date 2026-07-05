@@ -25,6 +25,12 @@ export default class ScoreAnnotatorPlugin extends Plugin {
       callback: () => this.openNewCanvasModal(),
     });
 
+    this.addCommand({
+      id: "paste-image",
+      name: "Paste image onto page",
+      callback: () => void this.getActiveController()?.pasteImageFromClipboard(),
+    });
+
     this.registerEvent(
       this.app.workspace.on("layout-change", () => this.syncLeaves()),
     );

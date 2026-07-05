@@ -3,13 +3,14 @@ import {
   PDFDict,
   PDFDocument,
   PDFHexString,
+  PDFImage,
   PDFName,
   PDFNumber,
   PDFPage,
   PDFRef,
   PDFString,
 } from "pdf-lib";
-import { PageStrokes, Stroke } from "./types";
+import { PageStrokes, PlacedImage, Stroke } from "./types";
 import { strokeOutlineCoords } from "./ink";
 
 // Marker used to identify InkAnnotations created by this plugin so we can
@@ -22,25 +23,39 @@ const ANNOT_VERSION = 1;
 export async function writeStrokesIntoPdf(
   bytes: ArrayBuffer,
   pages: PageStrokes[],
+  images: PlacedImage[] = [],
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(bytes);
   const pdfPages = pdfDoc.getPages();
 
   const pagesByIndex = new Map<number, Stroke[]>();
   for (const p of pages) pagesByIndex.set(p.pageIndex, p.strokes);
+  const imagesByIndex = new Map<number, PlacedImage[]>();
+  for (const img of images) {
+    const list = imagesByIndex.get(img.pageIndex);
+    if (list) list.push(img);
+    else imagesByIndex.set(img.pageIndex, [img]);
+  }
+
+  // Embedded images are deduplicated by source base64 across the whole
+  // document — pasting the same image twice shouldn't double the bytes.
+  const embedCache = new Map<string, PDFImage>();
 
   for (let i = 0; i < pdfPages.length; i++) {
     const pdfPage = pdfPages[i];
-    stripOwnInkAnnotations(pdfPage);
+    stripOwnAnnotations(pdfPage);
     const strokes = pagesByIndex.get(i);
-    if (!strokes || strokes.length === 0) continue;
-    addInkAnnotations(pdfDoc, pdfPage, strokes);
+    if (strokes && strokes.length > 0) addInkAnnotations(pdfDoc, pdfPage, strokes);
+    const pageImages = imagesByIndex.get(i);
+    if (pageImages && pageImages.length > 0) {
+      await addImageAnnotations(pdfDoc, pdfPage, pageImages, embedCache);
+    }
   }
 
   return pdfDoc.save({ useObjectStreams: true });
 }
 
-function stripOwnInkAnnotations(page: PDFPage): void {
+function stripOwnAnnotations(page: PDFPage): void {
   const annots = page.node.Annots();
   if (!annots) return;
   const ctx = page.doc.context;
@@ -50,7 +65,7 @@ function stripOwnInkAnnotations(page: PDFPage): void {
     const entry = annots.get(i);
     const dict = ctx.lookupMaybe(entry, PDFDict);
     if (!dict) continue;
-    if (!isOwnInkAnnotation(dict)) continue;
+    if (!isOwnInkAnnotation(dict) && !isOwnStampAnnotation(dict)) continue;
     removeIndices.push(i);
     if (entry instanceof PDFRef) refsToFree.push(entry);
   }
@@ -60,16 +75,24 @@ function stripOwnInkAnnotations(page: PDFPage): void {
   for (const ref of refsToFree) ctx.delete(ref);
 }
 
-export function isOwnInkAnnotation(dict: PDFDict): boolean {
-  const subtype = dict.get(PDFName.of("Subtype"));
-  if (!(subtype instanceof PDFName)) return false;
-  if (subtype.decodeText() !== "Ink") return false;
+function isOwnAnnotationOfSubtype(dict: PDFDict, subtype: string): boolean {
+  const st = dict.get(PDFName.of("Subtype"));
+  if (!(st instanceof PDFName)) return false;
+  if (st.decodeText() !== subtype) return false;
   if (dict.has(PDFName.of(ANNOT_MARKER_KEY))) return true;
   const t = dict.get(PDFName.of("T"));
   if (t instanceof PDFString || t instanceof PDFHexString) {
     return t.decodeText() === ANNOT_TAG;
   }
   return false;
+}
+
+export function isOwnInkAnnotation(dict: PDFDict): boolean {
+  return isOwnAnnotationOfSubtype(dict, "Ink");
+}
+
+export function isOwnStampAnnotation(dict: PDFDict): boolean {
+  return isOwnAnnotationOfSubtype(dict, "Stamp");
 }
 
 function addInkAnnotations(
@@ -164,6 +187,139 @@ function addInkAnnotations(
 
     annots.push(pdfDoc.context.register(annotDict));
   }
+}
+
+async function addImageAnnotations(
+  pdfDoc: PDFDocument,
+  page: PDFPage,
+  images: PlacedImage[],
+  embedCache: Map<string, PDFImage>,
+): Promise<void> {
+  const { width: mediaWidth, height: mediaHeight } = page.getSize();
+  const rotation = ((page.getRotation().angle % 360) + 360) % 360;
+  const rotatedVisual = rotation === 90 || rotation === 270;
+  const visualW = rotatedVisual ? mediaHeight : mediaWidth;
+  const visualH = rotatedVisual ? mediaWidth : mediaHeight;
+
+  let annots = page.node.Annots();
+  if (!annots) {
+    annots = pdfDoc.context.obj([]) as PDFArray;
+    page.node.set(PDFName.of("Annots"), annots);
+  }
+
+  for (const image of images) {
+    const embedded = await embedImageDeduped(pdfDoc, embedCache, image);
+
+    // Rotate the image's 4 corners (in visual, screen-like page space: x
+    // right, y down, matching the overlay canvas convention used to draw
+    // and place it) about its center, then map each corner through the
+    // same page-rotation handling normalizedToNative uses. This gives an
+    // exact native-space quadrilateral without ever needing to reason
+    // about how a rotation angle composes with page /Rotate.
+    const halfW = (image.w * visualW) / 2;
+    const halfH = (image.h * visualH) / 2;
+    const cxVisual = image.cx * visualW;
+    const cyVisualScreen = image.cy * visualH;
+    const cosR = Math.cos(image.rotation);
+    const sinR = Math.sin(image.rotation);
+    const cornerNative = (lx: number, ly: number) => {
+      const rx = cosR * lx - sinR * ly;
+      const ry = sinR * lx + cosR * ly;
+      const u = cxVisual + rx;
+      const v = visualH - (cyVisualScreen + ry);
+      return visualToNative(u, v, mediaWidth, mediaHeight, rotation);
+    };
+    const topLeft = cornerNative(-halfW, -halfH);
+    const topRight = cornerNative(halfW, -halfH);
+    const bottomLeft = cornerNative(-halfW, halfH);
+    const bottomRight = cornerNative(halfW, halfH);
+
+    const xs = [topLeft.x, topRight.x, bottomLeft.x, bottomRight.x];
+    const ys = [topLeft.y, topRight.y, bottomLeft.y, bottomRight.y];
+    const rect: [number, number, number, number] = [
+      round2(Math.min(...xs)),
+      round2(Math.min(...ys)),
+      round2(Math.max(...xs)),
+      round2(Math.max(...ys)),
+    ];
+
+    // Affine matrix mapping the Image XObject's unit square — (0,0)
+    // bottom-left, (1,0) bottom-right, (0,1) top-left, per the PDF Image
+    // XObject convention — onto the rotated quadrilateral above.
+    const a = bottomRight.x - bottomLeft.x;
+    const b = bottomRight.y - bottomLeft.y;
+    const c = topLeft.x - bottomLeft.x;
+    const d = topLeft.y - bottomLeft.y;
+    const e = bottomLeft.x;
+    const f = bottomLeft.y;
+    const ops = [
+      "q",
+      `${fmtNum(a)} ${fmtNum(b)} ${fmtNum(c)} ${fmtNum(d)} ${fmtNum(e)} ${fmtNum(f)} cm`,
+      "/Im0 Do",
+      "Q",
+    ];
+    const contentBytes = new TextEncoder().encode(ops.join("\n"));
+    const stream = pdfDoc.context.flateStream(contentBytes, {
+      Type: "XObject",
+      Subtype: "Form",
+      FormType: 1,
+      BBox: rect,
+      Resources: { ProcSet: ["PDF", "ImageC"], XObject: { Im0: embedded.ref } },
+    });
+    const apRef = pdfDoc.context.register(stream);
+
+    const annotDict = pdfDoc.context.obj({
+      Type: "Annot",
+      Subtype: "Stamp",
+      Rect: rect,
+      F: 4,
+      AP: { N: apRef },
+      T: PDFString.of(ANNOT_TAG),
+      [ANNOT_MARKER_KEY]: ANNOT_VERSION,
+      SAKind: PDFString.of("image"),
+      SAId: PDFString.of(image.id),
+      SAMime: PDFString.of(image.mime),
+      SACx: round2(image.cx),
+      SACy: round2(image.cy),
+      SAW: round2(image.w),
+      SAH: round2(image.h),
+      SARot: round2(image.rotation),
+      // Duplicated verbatim (rather than re-extracted from the embedded
+      // XObject on read) because pdf-lib's PNG embedder decodes to raw
+      // Flate-compressed pixel samples plus a separate alpha-channel
+      // XObject — reconstructing a standalone PNG from that means writing
+      // a PNG encoder ourselves. JPEG embedding *does* keep the source
+      // bytes verbatim (DCTDecode), but treating both formats the same
+      // way is simpler and more robust than a format-dependent read path.
+      // Cost: this roughly doubles the annotation's on-disk size.
+      SAData: PDFString.of(image.data),
+    }) as PDFDict;
+
+    annots.push(pdfDoc.context.register(annotDict));
+  }
+}
+
+async function embedImageDeduped(
+  pdfDoc: PDFDocument,
+  cache: Map<string, PDFImage>,
+  image: PlacedImage,
+): Promise<PDFImage> {
+  const cached = cache.get(image.data);
+  if (cached) return cached;
+  const bytes = base64ToBytes(image.data);
+  const embedded =
+    image.mime === "image/jpeg"
+      ? await pdfDoc.embedJpg(bytes)
+      : await pdfDoc.embedPng(bytes);
+  cache.set(image.data, embedded);
+  return embedded;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
 
 // Appearance stream for pen strokes: filled perfect-freehand outline polygon.
@@ -299,6 +455,22 @@ export function normalizedToNative(
   const visualH = rotated ? mediaWidth : mediaHeight;
   const u = nx * visualW;
   const v = (1 - ny) * visualH;
+  return visualToNative(u, v, mediaWidth, mediaHeight, rotation);
+}
+
+// Maps a point given in "visual" page space — x/y in PDF points, measured
+// from the top-left of the page as it's displayed on screen after applying
+// /Rotate — into native (unrotated) page coordinates. Factored out of
+// normalizedToNative so image placement (which needs to rotate a point
+// around an arbitrary center, not just remap a 0..1 normalized point) can
+// reuse the same page-rotation handling.
+function visualToNative(
+  u: number,
+  v: number,
+  mediaWidth: number,
+  mediaHeight: number,
+  rotation: number,
+): { x: number; y: number } {
   switch (rotation) {
     case 90:
       return { x: mediaWidth - v, y: u };

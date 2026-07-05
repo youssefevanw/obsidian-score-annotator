@@ -24,3 +24,14 @@ export interface PageStrokes {
   pageIndex: number;
   strokes: Stroke[];
 }
+
+export interface PlacedImage {
+  id: string;
+  pageIndex: number;
+  // normalized 0..1 page coords, like stroke points
+  cx: number; cy: number;      // center
+  w: number; h: number;        // size
+  rotation: number;            // radians
+  mime: "image/png" | "image/jpeg";
+  data: string;                // base64
+}

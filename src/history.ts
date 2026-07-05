@@ -1,4 +1,4 @@
-import { Stroke } from "./types";
+import { PlacedImage, Stroke } from "./types";
 
 export type HistoryAction =
   | { type: "add"; pageIndex: number; stroke: Stroke }
@@ -8,7 +8,8 @@ export type HistoryAction =
       removed: Stroke[];
       added: Stroke[];
       anyBaked: boolean;
-    };
+    }
+  | { type: "addImage"; image: PlacedImage };
 
 const MAX_HISTORY = 100;
 

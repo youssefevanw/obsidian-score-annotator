@@ -1,6 +1,6 @@
 import { App, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { PDFDocument } from "pdf-lib";
-import { PageStrokes, Point, Stroke, Tool } from "./types";
+import { PageStrokes, PlacedImage, Point, Stroke, Tool } from "./types";
 import { Toolbar } from "./toolbar";
 import { writeStrokesIntoPdf } from "./pdf-writer";
 import { readStrokesFromPdf } from "./pdf-reader";
@@ -13,6 +13,7 @@ import {
 import { History } from "./history";
 import { decimateStroke, paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
 import { ERASER_RADII, HIGHLIGHTER_WIDTHS, PEN_WIDTHS } from "./presets";
+import { ImagePlacement } from "./image-object";
 
 const DEFAULT_SWATCH_COLORS: readonly string[] = [
   "#e63946",
@@ -83,6 +84,24 @@ export class OverlayController {
   // the set automatically.
   private bakedStrokes = new WeakSet<Stroke>();
   private bakedRewriteTimer: number | null = null;
+
+  // Pasted images committed onto pages. Flat list (each entry already
+  // carries its own pageIndex), mirroring how allStrokes/bakedStrokes work.
+  private allImages: PlacedImage[] = [];
+  private bakedImages = new WeakSet<PlacedImage>();
+  // True once the PDF on disk holds any of our Stamp (image) annotations —
+  // same purpose as hasBakedStrokes, so an all-undo round-trip still
+  // strips them.
+  private hasBakedImages = false;
+  // Decoded <img> elements, keyed by PlacedImage.id, so redraw doesn't
+  // re-decode base64 every frame. Populated lazily; a paint before decode
+  // finishes is skipped and retried once onload fires.
+  private imageCache = new Map<string, HTMLImageElement>();
+  private imageLoading = new Set<string>();
+  // Non-null while a pasted image is being sized/positioned before commit.
+  // Only one at a time — see beginPlacementFromBlob.
+  private placement: ImagePlacement | null = null;
+  private pasteHandler: ((e: ClipboardEvent) => void) | null = null;
 
   // Only live for visible/near-visible pages
   private bindings = new Map<HTMLElement, PageBinding>();
@@ -159,7 +178,26 @@ export class OverlayController {
     this.observer = new MutationObserver(() => this.debouncedSyncPages());
     this.observer.observe(root, { childList: true, subtree: true });
 
+    this.pasteHandler = (e: ClipboardEvent) => this.handlePasteEvent(e);
+    root.addEventListener("paste", this.pasteHandler);
+
     this.keydownHandler = (e: KeyboardEvent) => {
+      if (this.placement) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          this.cancelPlacement();
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          this.commitPlacement();
+        }
+        // Swallow every other shortcut (save/undo/tool/color/size, etc.)
+        // while placing — only Escape/Enter and the gizmo's own pointer
+        // handling apply until the image is committed or cancelled.
+        return;
+      }
+
       const meta = e.metaKey || e.ctrlKey;
       if (meta) {
         const key = e.key.toLowerCase();
@@ -330,7 +368,12 @@ export class OverlayController {
       window.removeEventListener("blur", this.eraserKeyBlurHandler);
       this.eraserKeyBlurHandler = null;
     }
+    if (this.pasteHandler) {
+      this.leaf.view.containerEl.removeEventListener("paste", this.pasteHandler);
+      this.pasteHandler = null;
+    }
     this.eraserKeyHeld = false;
+    this.placement = null;
     for (const binding of this.bindings.values()) {
       binding.resizeObserver.disconnect();
       binding.canvas.remove();
@@ -354,7 +397,12 @@ export class OverlayController {
       return;
     }
     const pages = this.collectPageStrokes();
-    if (pages.length === 0 && !this.hasBakedStrokes) {
+    if (
+      pages.length === 0 &&
+      this.allImages.length === 0 &&
+      !this.hasBakedStrokes &&
+      !this.hasBakedImages
+    ) {
       new Notice("Nothing to save");
       return;
     }
@@ -366,8 +414,8 @@ export class OverlayController {
       if (!existingBak) {
         await this.app.vault.createBinary(bakPath, original);
       }
-      const newBytes = await writeStrokesIntoPdf(original, pages);
-      // Pre-mark the strokes we're about to bake BEFORE writing. Once
+      const newBytes = await writeStrokesIntoPdf(original, pages, this.allImages);
+      // Pre-mark the strokes/images we're about to bake BEFORE writing. Once
       // modifyBinary returns, Obsidian fires a file-change event and
       // PDF.js can repaint the page canvas with these strokes baked from
       // /AP /N — at that point our overlay must already know to skip
@@ -376,6 +424,7 @@ export class OverlayController {
       for (const pageStrokes of pages) {
         for (const s of pageStrokes.strokes) this.bakedStrokes.add(s);
       }
+      for (const image of this.allImages) this.bakedImages.add(image);
       await this.app.vault.modifyBinary(
         file,
         newBytes.slice().buffer as ArrayBuffer,
@@ -387,6 +436,7 @@ export class OverlayController {
       for (const b of this.bindings.values()) this.redraw(b);
       await deleteSidecar(this.app, file);
       this.hasBakedStrokes = pages.length > 0;
+      this.hasBakedImages = this.allImages.length > 0;
       new Notice(successNotice);
     } catch (err) {
       console.error("ScoreAnnotator save failed:", err);
@@ -479,6 +529,11 @@ export class OverlayController {
     }
     this.allStrokes.clear();
     this.hasBakedStrokes = false;
+    this.allImages = [];
+    this.hasBakedImages = false;
+    this.imageCache.clear();
+    this.imageLoading.clear();
+    this.placement = null;
     this.history.clear();
     this.initialLoadStarted = true;
     void this.applyInitialState(file);
@@ -490,32 +545,38 @@ export class OverlayController {
     this.paperStavesPerPage = undefined;
     const touched = new Set<number>();
     let bytes: ArrayBuffer | null = null;
-    let baked: PageStrokes[] = [];
+    let bakedPages: PageStrokes[] = [];
+    let bakedImages: PlacedImage[] = [];
 
     try {
       bytes = await this.app.vault.readBinary(file);
-      baked = await readStrokesFromPdf(bytes);
-      const total = baked.reduce((n, p) => n + p.strokes.length, 0);
+      const result = await readStrokesFromPdf(bytes);
+      bakedPages = result.pages;
+      bakedImages = result.images;
+      const total = bakedPages.reduce((n, p) => n + p.strokes.length, 0);
       // Track disk state independently of which source we load from — save()
       // needs this to know it should strip the baked set when the user
       // erases everything.
       this.hasBakedStrokes = total > 0;
+      this.hasBakedImages = bakedImages.length > 0;
       console.info(
-        `ScoreAnnotator: loaded ${total} baked stroke(s) across ${baked.length} page(s) from ${file.path}`,
+        `ScoreAnnotator: loaded ${total} baked stroke(s) across ${bakedPages.length} page(s) ` +
+          `and ${bakedImages.length} baked image(s) from ${file.path}`,
       );
     } catch (err) {
       console.warn("ScoreAnnotator: failed to read baked annotations:", err);
     }
 
-    // Sidecar is the complete unsaved state when present — pages it omits
-    // mean the user erased them. Use baked only when no sidecar exists, so
-    // erased pages don't reappear from the PDF on next open.
+    // Sidecar is the complete unsaved state when present — pages/images it
+    // omits mean the user erased them. Use baked only when no sidecar
+    // exists, so erased pages don't reappear from the PDF on next open.
     const sidecar = await readSidecar(this.app, file);
-    const active = sidecar ?? baked;
-    // Only mark strokes as baked when they came straight from the PDF. A
-    // sidecar represents unsaved edits — those strokes need overlay paint.
+    const activePages = sidecar?.pages ?? bakedPages;
+    const activeImages = sidecar?.images ?? bakedImages;
+    // Only mark strokes/images as baked when they came straight from the
+    // PDF. A sidecar represents unsaved edits — those need overlay paint.
     const fromBaked = !sidecar;
-    for (const page of active) {
+    for (const page of activePages) {
       const strokes = page.strokes.slice();
       this.allStrokes.set(page.pageIndex, strokes);
       if (fromBaked) {
@@ -523,6 +584,11 @@ export class OverlayController {
       }
       touched.add(page.pageIndex);
     }
+    this.allImages = activeImages.slice();
+    if (fromBaked) {
+      for (const img of this.allImages) this.bakedImages.add(img);
+    }
+    for (const img of this.allImages) touched.add(img.pageIndex);
 
     if (bytes) {
       try {
@@ -755,6 +821,10 @@ export class OverlayController {
   }
 
   private onPointerDown(e: PointerEvent, b: PageBinding) {
+    if (this.placement) {
+      this.onPlacementPointerDown(e, b);
+      return;
+    }
     // Palm rejection: a resting hand touch must not start a stroke while pen is drawing.
     if (e.pointerType === "touch" && this.penStrokeActive) return;
     // Tool for this gesture is decided once, here. The hold-key override
@@ -798,6 +868,10 @@ export class OverlayController {
   }
 
   private onPointerMove(e: PointerEvent, b: PageBinding) {
+    if (this.placement) {
+      this.onPlacementPointerMove(e, b);
+      return;
+    }
     if (!b.currentStroke) {
       // Hover only (no gesture in progress): keep the cursor's crosshair
       // in sync with "can this input draw right now" — pen always can.
@@ -827,6 +901,10 @@ export class OverlayController {
   }
 
   private onPointerUp(e: PointerEvent, b: PageBinding) {
+    if (this.placement) {
+      this.onPlacementPointerUp(e, b);
+      return;
+    }
     if (!b.currentStroke) return;
     const wasPen = b.currentStroke.tool === "pen";
     const wasEraser = b.currentStroke.tool === "eraser";
@@ -867,6 +945,51 @@ export class OverlayController {
     this.scheduleAutosave();
   }
 
+  // A pointerdown that lands inside the gizmo's bbox or on one of its
+  // handles starts a drag; a pointerdown anywhere else — a different page,
+  // or outside the bbox on the same page — commits the placement and
+  // swallows that click (the user clicks once more to start drawing).
+  private onPlacementPointerDown(e: PointerEvent, b: PageBinding) {
+    e.preventDefault();
+    if (!this.placement) return;
+    if (b.pageIndex !== this.placement.pageIndex) {
+      this.commitPlacement();
+      return;
+    }
+    const rect = b.canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const hit = this.placement.pointerDown(px, py, rect.width || 1, rect.height || 1);
+    if (!hit) {
+      this.commitPlacement();
+      return;
+    }
+    b.canvas.setPointerCapture(e.pointerId);
+    this.redraw(b);
+  }
+
+  private onPlacementPointerMove(e: PointerEvent, b: PageBinding) {
+    if (!this.placement || b.pageIndex !== this.placement.pageIndex) return;
+    const rect = b.canvas.getBoundingClientRect();
+    this.placement.pointerMove(
+      e.clientX - rect.left,
+      e.clientY - rect.top,
+      rect.width || 1,
+      rect.height || 1,
+      e.shiftKey,
+    );
+    this.redraw(b);
+    e.preventDefault();
+  }
+
+  private onPlacementPointerUp(e: PointerEvent, b: PageBinding) {
+    if (!this.placement || b.pageIndex !== this.placement.pageIndex) return;
+    this.placement.pointerUp();
+    if (b.canvas.hasPointerCapture(e.pointerId)) {
+      b.canvas.releasePointerCapture(e.pointerId);
+    }
+  }
+
   private scheduleAutosave() {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = window.setTimeout(() => {
@@ -880,10 +1003,10 @@ export class OverlayController {
     if (!file) return;
     const pages = this.collectPageStrokes();
     try {
-      if (pages.length === 0) {
+      if (pages.length === 0 && this.allImages.length === 0) {
         await deleteSidecar(this.app, file);
       } else {
-        await writeSidecar(this.app, file, pages);
+        await writeSidecar(this.app, file, pages, this.allImages.slice());
       }
     } catch (err) {
       console.warn("ScoreAnnotator autosave failed:", err);
@@ -999,6 +1122,19 @@ export class OverlayController {
       const b = this.bindingForPageIndex(action.pageIndex);
       if (b) this.redraw(b);
       this.scheduleAutosave();
+    } else if (action.type === "addImage") {
+      const idx = this.allImages.lastIndexOf(action.image);
+      if (idx !== -1) this.allImages.splice(idx, 1);
+      const wasBaked = this.bakedImages.has(action.image);
+      const b = this.bindingForPageIndex(action.image.pageIndex);
+      if (b) this.redraw(b);
+      if (wasBaked) {
+        // The image is still rendered by PDF.js from /AP /N on disk —
+        // re-save so the PDF gets rewritten without it.
+        this.scheduleBakedRewrite();
+      } else {
+        this.scheduleAutosave();
+      }
     } else {
       // erase undo: drop this gesture's fragments, restore the originals
       const toRemove = new Set(action.added);
@@ -1028,6 +1164,15 @@ export class OverlayController {
       const b = this.bindingForPageIndex(action.pageIndex);
       if (b) this.redraw(b);
       this.scheduleAutosave();
+    } else if (action.type === "addImage") {
+      this.allImages.push(action.image);
+      const b = this.bindingForPageIndex(action.image.pageIndex);
+      if (b) this.redraw(b);
+      if (this.bakedImages.has(action.image)) {
+        this.scheduleBakedRewrite();
+      } else {
+        this.scheduleAutosave();
+      }
     } else {
       // erase redo: remove the originals again, bring the fragments back
       const toRemove = new Set(action.removed);
@@ -1049,6 +1194,14 @@ export class OverlayController {
   private redraw(b: PageBinding) {
     const rect = b.pageEl.getBoundingClientRect();
     b.ctx.clearRect(0, 0, rect.width, rect.height);
+    // Images paint first (beneath ink), same as PDF.js paints baked
+    // annotations in the order they appear — but since strokes are the
+    // thing the user is actively editing, ink always reads on top here.
+    for (const image of this.allImages) {
+      if (image.pageIndex !== b.pageIndex) continue;
+      if (this.bakedImages.has(image)) continue;
+      this.paintImage(b.ctx, image, rect.width, rect.height);
+    }
     const strokes = this.allStrokes.get(b.pageIndex) ?? [];
     for (const stroke of strokes) {
       if (this.bakedStrokes.has(stroke)) continue;
@@ -1056,6 +1209,9 @@ export class OverlayController {
     }
     if (b.currentStroke && b.currentStroke.tool === "pen") {
       this.paintStroke(b.ctx, b.currentStroke, rect.width, rect.height);
+    }
+    if (this.placement && this.placement.pageIndex === b.pageIndex) {
+      this.placement.draw(b.ctx, rect.width, rect.height);
     }
   }
 
@@ -1071,6 +1227,166 @@ export class OverlayController {
       paintPenStroke(ctx, stroke, w, h);
     }
   }
+
+  private paintImage(
+    ctx: CanvasRenderingContext2D,
+    image: PlacedImage,
+    w: number,
+    h: number,
+  ) {
+    const el = this.getCachedImageElement(image);
+    if (!el) return; // not decoded yet; redraw fires again once it is
+    const cx = image.cx * w;
+    const cy = image.cy * h;
+    const iw = image.w * w;
+    const ih = image.h * h;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(image.rotation);
+    ctx.drawImage(el, -iw / 2, -ih / 2, iw, ih);
+    ctx.restore();
+  }
+
+  private getCachedImageElement(image: PlacedImage): HTMLImageElement | null {
+    const cached = this.imageCache.get(image.id);
+    if (cached) return cached;
+    if (!this.imageLoading.has(image.id)) {
+      this.imageLoading.add(image.id);
+      const el = new Image();
+      el.onload = () => {
+        this.imageCache.set(image.id, el);
+        this.imageLoading.delete(image.id);
+        const b = this.bindingForPageIndex(image.pageIndex);
+        if (b) this.redraw(b);
+      };
+      el.onerror = () => {
+        this.imageLoading.delete(image.id);
+        console.warn("ScoreAnnotator: failed to decode a placed image:", image.id);
+      };
+      el.src = `data:${image.mime};base64,${image.data}`;
+    }
+    return null;
+  }
+
+  // Picks the page binding whose page is closest to vertically centered in
+  // the current viewport — where a pasted image should land.
+  private centeredPageBinding(): PageBinding | undefined {
+    if (!this.scrollContainer || this.bindings.size === 0) return undefined;
+    const containerRect = this.scrollContainer.getBoundingClientRect();
+    const viewCenter = (containerRect.top + containerRect.bottom) / 2;
+    let best: PageBinding | undefined;
+    let bestDist = Infinity;
+    for (const b of this.bindings.values()) {
+      const r = b.pageEl.getBoundingClientRect();
+      const center = (r.top + r.bottom) / 2;
+      const d = Math.abs(center - viewCenter);
+      if (d < bestDist) {
+        bestDist = d;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  private handlePasteEvent(e: ClipboardEvent): void {
+    const items = e.clipboardData ? Array.from(e.clipboardData.items) : [];
+    const item = items.find((it) => it.type.startsWith("image/"));
+    if (!item) return; // let normal paste (e.g. into a text field) proceed
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (file) void this.beginPlacementFromBlob(file);
+  }
+
+  // Entry point for the "Paste image onto page" command — works even if
+  // focus has wandered off the view, unlike the native paste event.
+  async pasteImageFromClipboard(): Promise<void> {
+    const nav = navigator as Navigator & {
+      clipboard?: { read?: () => Promise<ClipboardItem[]> };
+    };
+    if (!nav.clipboard?.read) {
+      new Notice("Clipboard image read isn't available here");
+      return;
+    }
+    try {
+      const items = await nav.clipboard.read();
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        await this.beginPlacementFromBlob(blob);
+        return;
+      }
+      new Notice("No image on the clipboard");
+    } catch (err) {
+      console.error("ScoreAnnotator: paste image failed:", err);
+      new Notice("Paste image failed — see console");
+    }
+  }
+
+  private async beginPlacementFromBlob(blob: Blob): Promise<void> {
+    // Only one image in placement at a time — pasting again commits the
+    // current one first.
+    if (this.placement) this.commitPlacement();
+
+    const b = this.centeredPageBinding();
+    if (!b) {
+      new Notice("Open a page to paste onto");
+      return;
+    }
+
+    let mime: "image/png" | "image/jpeg";
+    let data: string;
+    try {
+      ({ mime, data } = await normalizeToPngOrJpeg(blob));
+    } catch (err) {
+      console.error("ScoreAnnotator: failed to read pasted image:", err);
+      new Notice("Couldn't read the pasted image");
+      return;
+    }
+
+    let img: HTMLImageElement;
+    try {
+      img = await loadImageElement(mime, data);
+    } catch (err) {
+      console.error("ScoreAnnotator: failed to decode pasted image:", err);
+      new Notice("Couldn't decode the pasted image");
+      return;
+    }
+
+    // Suspend drawing while placing: onPointerDown/Move/Up all check
+    // this.placement first and route to the gizmo instead.
+    const rect = b.pageEl.getBoundingClientRect();
+    this.placement = ImagePlacement.create(
+      b.pageIndex,
+      img,
+      mime,
+      data,
+      rect.width || 1,
+      rect.height || 1,
+    );
+    this.redraw(b);
+  }
+
+  private commitPlacement(): void {
+    if (!this.placement) return;
+    const placement = this.placement;
+    this.placement = null;
+    const image = placement.toPlacedImage();
+    this.allImages.push(image);
+    this.imageCache.set(image.id, placement.element);
+    this.history.push({ type: "addImage", image });
+    const b = this.bindingForPageIndex(image.pageIndex);
+    if (b) this.redraw(b);
+    this.scheduleAutosave();
+  }
+
+  private cancelPlacement(): void {
+    if (!this.placement) return;
+    const pageIndex = this.placement.pageIndex;
+    this.placement = null;
+    const b = this.bindingForPageIndex(pageIndex);
+    if (b) this.redraw(b);
+  }
 }
 
 // Returns a normalised pressure value for a pointer event.
@@ -1079,4 +1395,45 @@ export class OverlayController {
 function pointerPressure(e: PointerEvent): number {
   if (e.pointerType === "mouse" || e.pointerType === "touch") return 0.5;
   return Math.max(0, Math.min(1, e.pressure));
+}
+
+// PNG/JPEG pass through as-is; anything else (e.g. TIFF, which some
+// clipboards — notably macOS screenshots — can offer alongside a PNG) is
+// re-encoded to PNG via a canvas round-trip.
+async function normalizeToPngOrJpeg(
+  blob: Blob,
+): Promise<{ mime: "image/png" | "image/jpeg"; data: string }> {
+  if (blob.type === "image/png" || blob.type === "image/jpeg") {
+    return { mime: blob.type, data: await blobToBase64(blob) };
+  }
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("2D canvas context unavailable");
+  ctx.drawImage(bitmap, 0, 0);
+  const dataUrl = canvas.toDataURL("image/png");
+  return { mime: "image/png", data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageElement(mime: string, data: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Failed to decode pasted image"));
+    img.src = `data:${mime};base64,${data}`;
+  });
 }

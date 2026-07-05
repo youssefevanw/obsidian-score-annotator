@@ -13,6 +13,12 @@ Strokes are saved into the PDF as standard **InkAnnotations** (via [pdf-lib](htt
 - 5 pen sizes down to a 0.5pt hairline; 3 highlighter sizes
 - 6 customizable color slots
 
+**Images**
+- Paste an image (`Cmd/Ctrl+V`, or the **Paste image onto page** command) to place it on the page currently centered in view
+- Drag to move, corner handles to resize (aspect-locked by default; hold `Shift` to resize freely), top handle to rotate
+- `Enter` or clicking outside the box commits; `Escape` cancels
+- Saved as standard PDF Stamp annotations, alongside your ink
+
 **Erasing**
 - Segment eraser: removes only the part of a stroke it touches, splitting the rest into surviving fragments
 - Works on fresh strokes *and* strokes saved in previous sessions (the PDF is rewritten without them)
@@ -93,6 +99,7 @@ Because strokes are annotations rather than page content, the plugin can read th
 
 - Settings (colors, sizes) are per-session, not persisted
 - No lasso/select or move of existing strokes
+- Placed images can't be repositioned once committed — undo right after placing is the only way to take one back
 - One annotating view per PDF at a time behaves best
 
 ## License

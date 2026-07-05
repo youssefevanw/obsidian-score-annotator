@@ -8,23 +8,29 @@ import {
   PDFString,
   PDFHexString,
 } from "pdf-lib";
-import { isOwnInkAnnotation } from "./pdf-writer";
-import { PageStrokes, Point, Stroke } from "./types";
+import { isOwnInkAnnotation, isOwnStampAnnotation } from "./pdf-writer";
+import { PageStrokes, PlacedImage, Point, Stroke } from "./types";
 
 const DEFAULT_COLOR = "#000000";
 const DEFAULT_WIDTH = 2;
 const DEFAULT_OPACITY = 1;
 
+export interface ReadAnnotationsResult {
+  pages: PageStrokes[];
+  images: PlacedImage[];
+}
+
 export async function readStrokesFromPdf(
   bytes: ArrayBuffer,
-): Promise<PageStrokes[]> {
+): Promise<ReadAnnotationsResult> {
   const pdfDoc = await PDFDocument.load(bytes, {
     ignoreEncryption: true,
     throwOnInvalidObject: false,
   });
   const pdfPages = pdfDoc.getPages();
   const ctx = pdfDoc.context;
-  const out: PageStrokes[] = [];
+  const pages: PageStrokes[] = [];
+  const images: PlacedImage[] = [];
 
   for (let pageIndex = 0; pageIndex < pdfPages.length; pageIndex++) {
     const page = pdfPages[pageIndex];
@@ -38,6 +44,13 @@ export async function readStrokesFromPdf(
     for (let i = 0; i < annots.size(); i++) {
       const dict = ctx.lookupMaybe(annots.get(i), PDFDict);
       if (!dict) continue;
+
+      if (isOwnStampAnnotation(dict)) {
+        const image = readPlacedImage(ctx, dict, pageIndex);
+        if (image) images.push(image);
+        continue;
+      }
+
       if (!isOwnInkAnnotation(dict)) continue;
 
       const inkList = ctx.lookupMaybe(dict.get(PDFName.of("InkList")), PDFArray);
@@ -67,10 +80,48 @@ export async function readStrokesFromPdf(
       }
     }
 
-    if (strokes.length > 0) out.push({ pageIndex, strokes });
+    if (strokes.length > 0) pages.push({ pageIndex, strokes });
   }
 
-  return out;
+  return { pages, images };
+}
+
+// Reads a plugin-authored Stamp annotation back into a PlacedImage. The
+// transform (cx/cy/w/h/rotation) and image bytes are read from plugin keys
+// rather than re-derived from the /AP appearance stream — see the write-side
+// comment in pdf-writer.ts (SAData) for why the bytes are duplicated there
+// instead of extracted from the embedded XObject.
+function readPlacedImage(
+  ctx: PDFContext,
+  dict: PDFDict,
+  pageIndex: number,
+): PlacedImage | null {
+  const id = readString(ctx, dict, "SAId");
+  const mimeRaw = readString(ctx, dict, "SAMime");
+  const data = readString(ctx, dict, "SAData");
+  if (!id || !data) return null;
+  const mime = mimeRaw === "image/jpeg" ? "image/jpeg" : "image/png";
+  return {
+    id,
+    pageIndex,
+    cx: readNumber(ctx, dict, "SACx", 0.5),
+    cy: readNumber(ctx, dict, "SACy", 0.5),
+    w: readNumber(ctx, dict, "SAW", 0.5),
+    h: readNumber(ctx, dict, "SAH", 0.5),
+    rotation: readNumber(ctx, dict, "SARot", 0),
+    mime,
+    data,
+  };
+}
+
+function readString(
+  ctx: PDFContext,
+  dict: PDFDict,
+  key: string,
+): string | null {
+  const raw = dict.get(PDFName.of(key));
+  const str = ctx.lookupMaybe(raw, PDFString) ?? ctx.lookupMaybe(raw, PDFHexString);
+  return str ? str.decodeText() : null;
 }
 
 function pathToNormalizedPoints(
