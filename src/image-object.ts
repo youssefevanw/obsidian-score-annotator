@@ -38,7 +38,7 @@ export class ImagePlacement {
   rotation = 0;
 
   constructor(
-    public readonly pageIndex: number,
+    public pageIndex: number,
     private readonly img: HTMLImageElement,
     private readonly mime: "image/png" | "image/jpeg",
     private readonly data: string,
@@ -204,6 +204,18 @@ export class ImagePlacement {
 
   pointerUp(): void {
     this.drag = null;
+  }
+
+  // Reassigns this placement to a different page, reprojecting its
+  // normalized position/size against that page's own rect. Used when a
+  // drag carries the image's center across a page boundary — the caller
+  // (overlay.ts) computes the new cx/cy/w/h from the two pages' rects.
+  retarget(pageIndex: number, cx: number, cy: number, w: number, h: number): void {
+    this.pageIndex = pageIndex;
+    this.cx = cx;
+    this.cy = cy;
+    this.w = w;
+    this.h = h;
   }
 
   toPlacedImage(): PlacedImage {

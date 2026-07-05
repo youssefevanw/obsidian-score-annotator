@@ -968,9 +968,18 @@ export class OverlayController {
     this.redraw(b);
   }
 
+  // NOTE: once a drag starts, setPointerCapture pins every subsequent
+  // pointermove/pointerup for this gesture to the canvas that captured it
+  // (the page the drag *started* on) — the `b` these handlers receive stays
+  // fixed at that page for the whole gesture even after the placement has
+  // been reprojected onto a different page mid-drag. So `b` is only used
+  // here as a last-resort fallback; the page to compute against is always
+  // looked up from `this.placement.pageIndex`, which syncPlacementPage()
+  // keeps current.
   private onPlacementPointerMove(e: PointerEvent, b: PageBinding) {
-    if (!this.placement || b.pageIndex !== this.placement.pageIndex) return;
-    const rect = b.canvas.getBoundingClientRect();
+    if (!this.placement) return;
+    const current = this.bindingForPageIndex(this.placement.pageIndex) ?? b;
+    const rect = current.pageEl.getBoundingClientRect();
     this.placement.pointerMove(
       e.clientX - rect.left,
       e.clientY - rect.top,
@@ -978,16 +987,66 @@ export class OverlayController {
       rect.height || 1,
       e.shiftKey,
     );
-    this.redraw(b);
+    this.syncPlacementPage();
+    const target = this.bindingForPageIndex(this.placement.pageIndex);
+    if (target) this.redraw(target);
     e.preventDefault();
   }
 
   private onPlacementPointerUp(e: PointerEvent, b: PageBinding) {
-    if (!this.placement || b.pageIndex !== this.placement.pageIndex) return;
+    if (!this.placement) return;
     this.placement.pointerUp();
     if (b.canvas.hasPointerCapture(e.pointerId)) {
       b.canvas.releasePointerCapture(e.pointerId);
     }
+    // Final cross-page check in case the last move landed exactly on a
+    // boundary or a coalesced/skipped event left it unsynced.
+    this.syncPlacementPage();
+    const target = this.bindingForPageIndex(this.placement.pageIndex);
+    if (target) this.redraw(target);
+  }
+
+  // Finds the bound page whose element contains the given viewport point,
+  // if any (pages outside the scroll buffer aren't bound and won't match —
+  // treated the same as landing in the gutter between pages).
+  private pageBindingAtPoint(clientX: number, clientY: number): PageBinding | undefined {
+    for (const b of this.bindings.values()) {
+      const r = b.pageEl.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+        return b;
+      }
+    }
+    return undefined;
+  }
+
+  // Re-checks which bound page the placement's image center currently
+  // falls on. If it has crossed into a different bound page, reprojects
+  // cx/cy/w/h against that page's rect (preserving on-screen size) and
+  // redraws both the old and new page overlays. If the center is in the
+  // gutter between pages, or over a page that isn't bound, the current
+  // page is kept as-is.
+  private syncPlacementPage(): void {
+    if (!this.placement) return;
+    const oldBinding = this.bindingForPageIndex(this.placement.pageIndex);
+    if (!oldBinding) return;
+    const oldRect = oldBinding.pageEl.getBoundingClientRect();
+    const absX = oldRect.left + this.placement.cx * oldRect.width;
+    const absY = oldRect.top + this.placement.cy * oldRect.height;
+    const target = this.pageBindingAtPoint(absX, absY);
+    if (!target || target.pageIndex === this.placement.pageIndex) return;
+
+    const newRect = target.pageEl.getBoundingClientRect();
+    const wPx = this.placement.w * oldRect.width;
+    const hPx = this.placement.h * oldRect.height;
+    this.placement.retarget(
+      target.pageIndex,
+      (absX - newRect.left) / (newRect.width || 1),
+      (absY - newRect.top) / (newRect.height || 1),
+      wPx / (newRect.width || 1),
+      hPx / (newRect.height || 1),
+    );
+    this.redraw(oldBinding);
+    this.redraw(target);
   }
 
   private scheduleAutosave() {
@@ -1369,9 +1428,13 @@ export class OverlayController {
 
   private commitPlacement(): void {
     if (!this.placement) return;
+    // Final cross-page check — normally already current from the last
+    // pointermove, but a click-to-commit or Enter shouldn't trust that.
+    this.syncPlacementPage();
     const placement = this.placement;
     this.placement = null;
     const image = placement.toPlacedImage();
+    clampPlacedImageToPage(image);
     this.allImages.push(image);
     this.imageCache.set(image.id, placement.element);
     this.history.push({ type: "addImage", image });
@@ -1427,6 +1490,19 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
     reader.readAsDataURL(blob);
   });
+}
+
+// Keeps at least this fraction of the image's width/height overlapping the
+// page, in case a drag was released mostly (or fully) off-page.
+const MIN_VISIBLE_FRACTION = 0.25;
+
+function clampPlacedImageToPage(image: PlacedImage): void {
+  const minCx = -MIN_VISIBLE_FRACTION * image.w;
+  const maxCx = 1 + MIN_VISIBLE_FRACTION * image.w;
+  const minCy = -MIN_VISIBLE_FRACTION * image.h;
+  const maxCy = 1 + MIN_VISIBLE_FRACTION * image.h;
+  image.cx = Math.min(maxCx, Math.max(minCx, image.cx));
+  image.cy = Math.min(maxCy, Math.max(minCy, image.cy));
 }
 
 function loadImageElement(mime: string, data: string): Promise<HTMLImageElement> {
