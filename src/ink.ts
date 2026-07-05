@@ -1,5 +1,5 @@
 import getStroke from "perfect-freehand";
-import { Stroke } from "./types";
+import { Point, Stroke } from "./types";
 
 function hasPressureData(stroke: Stroke): boolean {
   return stroke.points.some((p) => p.p !== undefined && p.p > 0);
@@ -33,6 +33,70 @@ export function strokeOutlineCoords(
     streamline: 0.5,
     simulatePressure: !hasPressure,
   });
+}
+
+// Ramer-Douglas-Peucker simplification of a stroke's centerline, run once at
+// gesture end. Coalesced pointer events oversample heavily (a fast cursive
+// word can carry hundreds of points); this shrinks /InkList, /SAPress, the
+// appearance outline, and the sidecar all at once without visibly changing
+// the shape. Distance is measured in the same units as `w`/`h` (CSS px at
+// the page's current on-screen size), so tolerance stays perceptually
+// constant across zoom levels. Each surviving point keeps its pressure.
+export function decimateStroke(
+  points: Point[],
+  w: number,
+  h: number,
+  tolerancePx: number,
+): Point[] {
+  if (points.length < 3) return points;
+  const px = points.map((p) => ({ x: p.x * w, y: p.y * h }));
+  const keep = new Array<boolean>(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+
+  // Iterative RDP (explicit stack) to avoid recursion-depth issues on very
+  // long strokes.
+  const stack: [number, number][] = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [start, end] = stack.pop()!;
+    if (end <= start + 1) continue;
+    const a = px[start];
+    const b = px[end];
+    let maxDist = -1;
+    let maxIdx = -1;
+    for (let i = start + 1; i < end; i++) {
+      const d = perpendicularDistance(px[i], a, b);
+      if (d > maxDist) {
+        maxDist = d;
+        maxIdx = i;
+      }
+    }
+    if (maxDist > tolerancePx) {
+      keep[maxIdx] = true;
+      stack.push([start, maxIdx], [maxIdx, end]);
+    }
+  }
+
+  const out: Point[] = [];
+  for (let i = 0; i < points.length; i++) {
+    if (keep[i]) out.push(points[i]);
+  }
+  return out;
+}
+
+function perpendicularDistance(
+  p: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  const projX = a.x + t * dx;
+  const projY = a.y + t * dy;
+  return Math.hypot(p.x - projX, p.y - projY);
 }
 
 // Infer whether a stroke should render as a pen (filled outline) or

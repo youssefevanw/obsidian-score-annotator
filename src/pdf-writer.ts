@@ -37,7 +37,7 @@ export async function writeStrokesIntoPdf(
     addInkAnnotations(pdfDoc, pdfPage, strokes);
   }
 
-  return pdfDoc.save();
+  return pdfDoc.save({ useObjectStreams: true });
 }
 
 function stripOwnInkAnnotations(page: PDFPage): void {
@@ -105,7 +105,7 @@ function addInkAnnotations(
     let maxY = -Infinity;
     const flatPath: number[] = [];
     for (const pt of native) {
-      flatPath.push(pt.x, pt.y);
+      flatPath.push(round2(pt.x), round2(pt.y));
       if (pt.x < minX) minX = pt.x;
       if (pt.x > maxX) maxX = pt.x;
       if (pt.y < minY) minY = pt.y;
@@ -113,10 +113,10 @@ function addInkAnnotations(
     }
     const pad = Math.max(stroke.width, 1);
     const rect: [number, number, number, number] = [
-      minX - pad,
-      minY - pad,
-      maxX + pad,
-      maxY + pad,
+      round2(minX - pad),
+      round2(minY - pad),
+      round2(maxX + pad),
+      round2(maxY + pad),
     ];
 
     const strokeKind = stroke.kind ?? (stroke.opacity < 1 ? "highlighter" : "pen");
@@ -157,7 +157,7 @@ function addInkAnnotations(
 
     if (hasPressure) {
       const pressureArr = pdfDoc.context.obj(
-        stroke.points.map((p) => PDFNumber.of(p.p ?? 0.5)),
+        stroke.points.map((p) => PDFNumber.of(round2(p.p ?? 0.5))),
       ) as PDFArray;
       annotDict.set(PDFName.of("SAPress"), pressureArr);
     }
@@ -176,7 +176,7 @@ function buildFilledInkAppearance(
   width: number,
   opacity: number,
 ): PDFRef {
-  const poly = strokeOutlineCoords(points, width);
+  const poly = simplifyOutline(strokeOutlineCoords(points, width), OUTLINE_SIMPLIFY_TOLERANCE);
 
   const useExtState = opacity < 1;
   const ops: string[] = ["q"];
@@ -238,7 +238,7 @@ function buildAppearanceStream(
       }
     : { ProcSet: ["PDF"] };
 
-  const stream = pdfDoc.context.stream(contentBytes, {
+  const stream = pdfDoc.context.flateStream(contentBytes, {
     Type: "XObject",
     Subtype: "Form",
     FormType: 1,
@@ -248,9 +248,43 @@ function buildAppearanceStream(
   return pdfDoc.context.register(stream);
 }
 
+// perfect-freehand emits a dense outline (often 2-4 vertices per input
+// sample). Vertices this close together are visually indistinguishable in
+// the filled path, so drop them before serializing.
+const OUTLINE_SIMPLIFY_TOLERANCE = 0.3;
+
+function simplifyOutline(poly: number[][], tolerance: number): number[][] {
+  if (poly.length < 3) return poly;
+  const minDist2 = tolerance * tolerance;
+  const out: number[][] = [poly[0]];
+  for (let i = 1; i < poly.length; i++) {
+    const prev = out[out.length - 1];
+    const dx = poly[i][0] - prev[0];
+    const dy = poly[i][1] - prev[1];
+    if (dx * dx + dy * dy >= minDist2) out.push(poly[i]);
+  }
+  // The path is closed with an explicit `h` operator — drop a final vertex
+  // that's already effectively back at the start so `h` doesn't produce a
+  // near-zero-length closing edge.
+  if (out.length > 2) {
+    const first = out[0];
+    const last = out[out.length - 1];
+    const dx = last[0] - first[0];
+    const dy = last[1] - first[1];
+    if (dx * dx + dy * dy < minDist2) out.pop();
+  }
+  return out;
+}
+
 function fmtNum(n: number): string {
   if (Number.isInteger(n)) return String(n);
-  return n.toFixed(3).replace(/\.?0+$/, "");
+  return n.toFixed(2).replace(/\.?0+$/, "");
+}
+
+// PDF-space coordinates and pressures only need ~2 decimals for sub-visible
+// accuracy; full float precision costs ~15 chars per number.
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 export function normalizedToNative(

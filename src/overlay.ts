@@ -11,7 +11,7 @@ import {
   parsePaperSubject,
 } from "./paper-generator";
 import { History } from "./history";
-import { paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
+import { decimateStroke, paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
 import { ERASER_RADII, HIGHLIGHTER_WIDTHS, PEN_WIDTHS } from "./presets";
 
 const DEFAULT_SWATCH_COLORS: readonly string[] = [
@@ -47,6 +47,9 @@ const AUTOSAVE_DEBOUNCE_MS = 500;
 const SIDECAR_RETRY_LIMIT = 30;
 const SIDECAR_RETRY_DELAY_MS = 100;
 const SCROLL_BUFFER_PX = 1000; // bind canvases this far above/below viewport
+// RDP simplification tolerance applied to a stroke's centerline at gesture
+// end, in CSS px at the page's current on-screen size (see decimateStroke).
+const STROKE_DECIMATE_TOLERANCE_PX = 0.2;
 
 export class OverlayController {
   // Pan/Draw mode. Only gates mouse/touch — pen always draws, and the
@@ -827,6 +830,13 @@ export class OverlayController {
     const wasPen = b.currentStroke.tool === "pen";
     const wasEraser = b.currentStroke.tool === "eraser";
     if (wasPen && b.currentStroke.points.length > 0) {
+      const rect = b.canvas.getBoundingClientRect();
+      b.currentStroke.points = decimateStroke(
+        b.currentStroke.points,
+        rect.width || 1,
+        rect.height || 1,
+        STROKE_DECIMATE_TOLERANCE_PX,
+      );
       const strokes = this.allStrokes.get(b.pageIndex) ?? [];
       strokes.push(b.currentStroke);
       this.allStrokes.set(b.pageIndex, strokes);
