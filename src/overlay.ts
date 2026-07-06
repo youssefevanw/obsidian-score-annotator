@@ -1,6 +1,6 @@
 import { App, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { PDFDocument } from "pdf-lib";
-import { PageStrokes, PlacedImage, Point, Stroke, Tool } from "./types";
+import { PageStrokes, PlacedImage, Point, SettingsHost, Stroke, Tool } from "./types";
 import { Toolbar } from "./toolbar";
 import { writeStrokesIntoPdf } from "./pdf-writer";
 import { readStrokesFromPdf } from "./pdf-reader";
@@ -133,7 +133,44 @@ export class OverlayController {
   private scrollSyncTimer: number | null = null;
   private toolbarHasAddPage = false;
 
-  constructor(private app: App, private leaf: WorkspaceLeaf) {}
+  constructor(
+    private app: App,
+    private leaf: WorkspaceLeaf,
+    private settingsHost: SettingsHost,
+  ) {}
+
+  // Overlays the saved palette/tool sizes onto the class-field defaults.
+  // Missing or partial saved data (new install, older sidecar shape, a
+  // slot the user never customized) falls back to the default per-slot.
+  private applyPersistedSettings(): void {
+    const saved = this.settingsHost.getSettings();
+    if (Array.isArray(saved.colors)) {
+      for (let i = 0; i < this.colors.length; i++) {
+        const c = saved.colors[i];
+        if (typeof c === "string" && c) this.colors[i] = c;
+      }
+    }
+    if (typeof saved.penWidth === "number") this.penWidth = saved.penWidth;
+    if (typeof saved.highlighterWidth === "number") {
+      this.highlighterWidth = saved.highlighterWidth;
+    }
+    if (typeof saved.eraserRadius === "number") this.eraserRadius = saved.eraserRadius;
+  }
+
+  private setPenWidth(w: number): void {
+    this.penWidth = w;
+    this.settingsHost.saveSettings({ penWidth: w });
+  }
+
+  private setHighlighterWidth(w: number): void {
+    this.highlighterWidth = w;
+    this.settingsHost.saveSettings({ highlighterWidth: w });
+  }
+
+  private setEraserRadius(r: number): void {
+    this.eraserRadius = r;
+    this.settingsHost.saveSettings({ eraserRadius: r });
+  }
 
   private buildToolbar(root: HTMLElement, withAddPage: boolean): void {
     this.toolbar?.destroy();
@@ -145,20 +182,23 @@ export class OverlayController {
       setTool: (t) => (this.tool = t),
       getColors: () => this.colors,
       setColor: (i, c) => {
-        if (i >= 0 && i < this.colors.length) this.colors[i] = c;
+        if (i >= 0 && i < this.colors.length) {
+          this.colors[i] = c;
+          this.settingsHost.saveSettings({ colors: this.colors.slice() });
+        }
       },
       getActiveColorIndex: () => this.activeColorIndex,
       setActiveColorIndex: (i) => {
         if (i >= 0 && i < this.colors.length) this.activeColorIndex = i;
       },
       getPenWidth: () => this.penWidth,
-      setPenWidth: (w) => (this.penWidth = w),
+      setPenWidth: (w) => this.setPenWidth(w),
       getHighlighterWidth: () => this.highlighterWidth,
-      setHighlighterWidth: (w) => (this.highlighterWidth = w),
+      setHighlighterWidth: (w) => this.setHighlighterWidth(w),
       getHighlighterOpacity: () => this.highlighterOpacity,
       setHighlighterOpacity: (o) => (this.highlighterOpacity = o),
       getEraserRadius: () => this.eraserRadius,
-      setEraserRadius: (r) => (this.eraserRadius = r),
+      setEraserRadius: (r) => this.setEraserRadius(r),
       isEraserOverride: () => this.eraserKeyHeld,
       onSave: () => void this.save(),
       onAddPage: withAddPage ? () => void this.addPage() : undefined,
@@ -166,6 +206,7 @@ export class OverlayController {
   }
 
   attach() {
+    this.applyPersistedSettings();
     const root = this.leaf.view.containerEl;
     this.buildToolbar(root, false);
 
@@ -252,9 +293,9 @@ export class OverlayController {
               : PEN_WIDTHS;
         if (sizeIdx < presets.length) {
           const w = presets[sizeIdx];
-          if (this.tool === "eraser") this.eraserRadius = w;
-          else if (this.tool === "highlighter") this.highlighterWidth = w;
-          else this.penWidth = w;
+          if (this.tool === "eraser") this.setEraserRadius(w);
+          else if (this.tool === "highlighter") this.setHighlighterWidth(w);
+          else this.setPenWidth(w);
           this.toolbar?.refresh();
           e.preventDefault();
           e.stopPropagation();

@@ -25,6 +25,20 @@ export interface PageStrokes {
   strokes: Stroke[];
 }
 
+// Palette/tool-size state persisted across sessions via the plugin's
+// loadData/saveData (see main.ts). Selected slot and tool are session-only.
+export interface PersistedSettings {
+  colors?: string[];
+  penWidth?: number;
+  highlighterWidth?: number;
+  eraserRadius?: number;
+}
+
+export interface SettingsHost {
+  getSettings(): PersistedSettings;
+  saveSettings(patch: Partial<PersistedSettings>): void;
+}
+
 export interface PlacedImage {
   id: string;
   pageIndex: number;

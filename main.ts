@@ -2,11 +2,20 @@ import { Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import { OverlayController } from "./src/overlay";
 import { NewPaperCanvasModal } from "./src/paper-modal";
 import { PaperOptions, generatePaperPdf } from "./src/paper-generator";
+import { PersistedSettings } from "./src/types";
+
+// Coalesces rapid-fire edits (e.g. dragging the OS color picker) into one
+// disk write.
+const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 
 export default class ScoreAnnotatorPlugin extends Plugin {
   private controllers = new WeakMap<WorkspaceLeaf, OverlayController>();
+  private settings: PersistedSettings = {};
+  private settingsSaveTimer: number | null = null;
 
   async onload() {
+    this.settings = (await this.loadData()) ?? {};
+
     this.addCommand({
       id: "toggle-draw-mode",
       name: "Toggle draw/pan mode",
@@ -55,6 +64,12 @@ export default class ScoreAnnotatorPlugin extends Plugin {
         this.controllers.delete(leaf);
       }
     });
+    // Flush a pending debounced write rather than losing the last edit.
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+      void this.saveData(this.settings);
+    }
   }
 
   private syncLeaves() {
@@ -65,10 +80,22 @@ export default class ScoreAnnotatorPlugin extends Plugin {
         existing.syncFile();
         return;
       }
-      const controller = new OverlayController(this.app, leaf);
+      const controller = new OverlayController(this.app, leaf, {
+        getSettings: () => this.settings,
+        saveSettings: (patch) => this.saveSettings(patch),
+      });
       this.controllers.set(leaf, controller);
       controller.attach();
     });
+  }
+
+  private saveSettings(patch: Partial<PersistedSettings>) {
+    Object.assign(this.settings, patch);
+    if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
+    this.settingsSaveTimer = window.setTimeout(() => {
+      this.settingsSaveTimer = null;
+      void this.saveData(this.settings);
+    }, SETTINGS_SAVE_DEBOUNCE_MS);
   }
 
   private getActiveController(): OverlayController | undefined {

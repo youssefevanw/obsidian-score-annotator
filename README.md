@@ -97,7 +97,7 @@ Because strokes are annotations rather than page content, the plugin can read th
 
 ## Known limitations
 
-- Settings (colors, sizes) are per-session, not persisted
+- Color palette and pen/highlighter/eraser sizes persist across sessions; active tool, active color slot, and highlighter opacity are per-session
 - No lasso/select or move of existing strokes
 - Placed images can't be repositioned once committed — undo right after placing is the only way to take one back
 - One annotating view per PDF at a time behaves best
