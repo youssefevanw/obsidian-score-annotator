@@ -11,7 +11,7 @@ import {
   parsePaperSubject,
 } from "./paper-generator";
 import { History } from "./history";
-import { decimateStroke, paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
+import { paintHighlighterStroke, paintPenStroke, strokeKind } from "./ink";
 import { ERASER_RADII, HIGHLIGHTER_WIDTHS, PEN_WIDTHS } from "./presets";
 import { ImagePlacement } from "./image-object";
 
@@ -49,12 +49,18 @@ const AUTOSAVE_DEBOUNCE_MS = 500;
 const SIDECAR_RETRY_LIMIT = 30;
 const SIDECAR_RETRY_DELAY_MS = 100;
 const SCROLL_BUFFER_PX = 1000; // bind canvases this far above/below viewport
-// RDP simplification tolerance applied to a stroke's centerline at gesture
-// end, in CSS px at the page's current on-screen size (see decimateStroke).
-// 0.08 was chosen by eye against real Wacom cursive: it's the largest value
-// that stays indistinguishable from the undecimated stroke at 100% and 400%
-// zoom.
-const STROKE_DECIMATE_TOLERANCE_PX = 0.08;
+// Centerline (RDP) decimation was tried and removed: it measures deviation
+// in (x,y) only, so on any stroke segment that's geometrically straight or
+// gently curved — extremely common in cursive, e.g. a downstroke — it has
+// zero problem collapsing 100+ points down to just the 2 endpoints even
+// though pressure (hence rendered width) swings from light to heavy and
+// back along the way. That pressure arc is real ink; RDP has no way to see
+// it, so no tolerance value is safe. Confirmed with a synthetic straight
+// stroke carrying a pressure peak in the middle: any nonzero tolerance
+// reduced it to its two low-pressure endpoints, rendering the whole
+// segment thin/faint instead of the intended heavy stroke. Flate
+// compression on the appearance stream plus 2-decimal coordinate/pressure
+// rounding (pdf-writer.ts) remain — they don't touch the point sequence.
 
 export class OverlayController {
   // Pan/Draw mode. Only gates mouse/touch — pen always draws, and the
@@ -953,13 +959,6 @@ export class OverlayController {
     const wasPen = b.currentStroke.tool === "pen";
     const wasEraser = b.currentStroke.tool === "eraser";
     if (wasPen && b.currentStroke.points.length > 0) {
-      const rect = b.canvas.getBoundingClientRect();
-      b.currentStroke.points = decimateStroke(
-        b.currentStroke.points,
-        rect.width || 1,
-        rect.height || 1,
-        STROKE_DECIMATE_TOLERANCE_PX,
-      );
       const strokes = this.allStrokes.get(b.pageIndex) ?? [];
       strokes.push(b.currentStroke);
       this.allStrokes.set(b.pageIndex, strokes);
