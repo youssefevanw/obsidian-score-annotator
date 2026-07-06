@@ -406,8 +406,11 @@ function buildAppearanceStream(
 
 // perfect-freehand emits a dense outline (often 2-4 vertices per input
 // sample). Vertices this close together are visually indistinguishable in
-// the filled path, so drop them before serializing.
-const OUTLINE_SIMPLIFY_TOLERANCE = 0.3;
+// the filled path, so drop them before serializing. 0.1 (PDF points) was
+// chosen by eye against real Wacom cursive: it's the largest value that
+// stays indistinguishable from the unsimplified outline at 100% and 400%
+// zoom.
+const OUTLINE_SIMPLIFY_TOLERANCE = 0.1;
 
 function simplifyOutline(poly: number[][], tolerance: number): number[][] {
   if (poly.length < 3) return poly;

@@ -51,7 +51,10 @@ const SIDECAR_RETRY_DELAY_MS = 100;
 const SCROLL_BUFFER_PX = 1000; // bind canvases this far above/below viewport
 // RDP simplification tolerance applied to a stroke's centerline at gesture
 // end, in CSS px at the page's current on-screen size (see decimateStroke).
-const STROKE_DECIMATE_TOLERANCE_PX = 0.2;
+// 0.08 was chosen by eye against real Wacom cursive: it's the largest value
+// that stays indistinguishable from the undecimated stroke at 100% and 400%
+// zoom.
+const STROKE_DECIMATE_TOLERANCE_PX = 0.08;
 
 export class OverlayController {
   // Pan/Draw mode. Only gates mouse/touch — pen always draws, and the
